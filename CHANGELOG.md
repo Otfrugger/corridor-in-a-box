@@ -224,6 +224,11 @@ contract itself rejected the attestation, the error carries its number as
 `examples/attest.ts` now checks `contractError === AttesterContractError.TooSoon`.
 The error `code` and message text are unchanged, so existing callers keep
 working.
+### Breaking — Pre-settle gate mandatory by default with explicit named opt-out (2026-09-25)
+
+The pre-settle gate is now mandatory before settlement execution. In `EngineDeps`, callers must supply either `gate: PreSettleGate` (e.g. `defaultSep31Gate()`) or explicitly opt out with `unsafeSkipPreSettleGate: true`. If neither is provided, `execute()` fails fast immediately with error code `ENGINE_MISCONFIGURED` before claiming the idempotency key (ensuring no run row is persisted).
+
+When opted out via `unsafeSkipPreSettleGate: true`, the engine passes through the `verifying` state, emits a warning log, and records a synthetic `gate.skipped` check on the transition audit entry. The `CompositeGate` runs checks concurrently, fail-closed, recording results on the `AuditEntry` and incrementing the `corridor.gate.check` metric.
 
 ### Added — `verifying` state between `opened` and `settling` (2026-09-25)
 

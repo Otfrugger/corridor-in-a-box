@@ -48,6 +48,8 @@ export {
 } from "./verbs";
 export {
   CompositeGate,
+  defaultSep31Gate,
+  type DefaultSep31GateOptions,
   type GateContext,
   type CheckResult,
   type GateCheck,
@@ -69,11 +71,4 @@ export {
   type Metrics,
   type MetricTags,
 } from "./observability";
-export {
-  CompositeGate,
-  type CheckResult,
-  type GateCheck,
-  type GateContext,
-  type PreSettleGate,
-} from "./gate";
 export { quoteWindowCheck } from "./quoteWindow";

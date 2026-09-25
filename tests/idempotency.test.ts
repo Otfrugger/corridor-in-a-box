@@ -62,6 +62,7 @@ function deps(store: InMemoryIdempotencyStore): EngineDeps {
     idempotency: store,
     sleep: async () => {},
     trustManifestWithoutAttestation: true,
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -123,6 +124,7 @@ describe("concurrent claim", () => {
       idempotency: store,
       sleep: async () => {},
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
 
     const [a, b] = await Promise.all([
