@@ -51,6 +51,7 @@ describe("audit trail", () => {
       idempotency: new InMemoryIdempotencyStore(),
       audit,
       now: () => 1700000000000,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(true);
@@ -86,6 +87,7 @@ describe("audit trail", () => {
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       audit,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(false);
@@ -211,6 +213,7 @@ describe("reconcile polling observability", () => {
       idempotency: new InMemoryIdempotencyStore(),
       logger,
       metrics,
+      unsafeSkipPreSettleGate: true,
     };
 
     const r = await execute(intent, corridor(), deps);

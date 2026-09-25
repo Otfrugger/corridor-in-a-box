@@ -48,6 +48,7 @@ function deps(metrics: InMemoryMetrics, adapterOpts = {}): EngineDeps {
     idempotency: new InMemoryIdempotencyStore(),
     metrics,
     sleep: async () => {},
+    unsafeSkipPreSettleGate: true,
   };
 }
 

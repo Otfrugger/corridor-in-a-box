@@ -37,6 +37,8 @@ export {
 } from "./verbs";
 export {
   CompositeGate,
+  defaultSep31Gate,
+  type DefaultSep31GateOptions,
   type GateContext,
   type CheckResult,
   type GateCheck,
