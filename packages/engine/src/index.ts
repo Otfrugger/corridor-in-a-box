@@ -47,6 +47,13 @@ export {
   type RefundPollOptions,
 } from "./verbs";
 export {
+  CompositeGate,
+  type GateContext,
+  type CheckResult,
+  type GateCheck,
+  type PreSettleGate,
+} from "./gate";
+export {
   consoleLogger,
   silentLogger,
   InMemoryAuditLog,
