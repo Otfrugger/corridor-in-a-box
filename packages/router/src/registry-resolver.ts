@@ -82,7 +82,7 @@ export class RegistryRouteResolver implements RouteResolver {
     const domain = corridor.dest.endpoints.home_domain;
 
     if (this.allowed.has(domain)) {
-      return { receiving: this.adapterFor(corridor) };
+      return { receiving: this.adapterFor(corridor), trust: "attested" };
     }
 
     let serves: boolean;
@@ -116,6 +116,6 @@ export class RegistryRouteResolver implements RouteResolver {
       );
     }
 
-    return { receiving: this.adapterFor(corridor) };
+    return { receiving: this.adapterFor(corridor), trust: "attested" };
   }
 }

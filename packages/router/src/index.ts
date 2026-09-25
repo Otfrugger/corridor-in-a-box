@@ -14,10 +14,16 @@ export interface RouteDecision {
   readonly receiving: AnchorAdapter;
   /** Reserved for split routing across multiple anchors (weights sum to 1). */
   readonly split?: ReadonlyArray<{ adapter: AnchorAdapter; weight: number }>;
+  /** How the route decision was reached: verified against on-chain evidence or assumed from manifest. */
+  readonly trust: "attested" | "manifest";
 }
 
 export interface RouteResolver {
   resolve(intent: PaymentIntent, corridor: Corridor): Promise<RouteDecision>;
+}
+
+export interface StaticRouteResolverOptions {
+  readonly trustManifestWithoutAttestation?: boolean;
 }
 
 /**
@@ -26,10 +32,22 @@ export interface RouteResolver {
  * to the engine — that is the entire open/closed boundary.
  */
 export class StaticRouteResolver implements RouteResolver {
-  constructor(private readonly adapterFor: (corridor: Corridor) => AnchorAdapter) {}
+  constructor(
+    private readonly adapterFor: (corridor: Corridor) => AnchorAdapter,
+    options?: StaticRouteResolverOptions,
+  ) {
+    if (!options?.trustManifestWithoutAttestation) {
+      throw new Error(
+        "StaticRouteResolver requires explicit { trustManifestWithoutAttestation: true }. Use RegistryRouteResolver for verified routing.",
+      );
+    }
+  }
 
   async resolve(_intent: PaymentIntent, corridor: Corridor): Promise<RouteDecision> {
-    return { receiving: this.adapterFor(corridor) };
+    return {
+      receiving: this.adapterFor(corridor),
+      trust: "manifest",
+    };
   }
 }
 

@@ -46,10 +46,13 @@ function intentBody(key = "p1"): PaymentIntent {
 
 function deps(adapterOpts = {}): EngineDeps {
   return {
-    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts)),
+    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
     sleep: async () => {},
+    trustManifestWithoutAttestation: true,
   };
 }
 

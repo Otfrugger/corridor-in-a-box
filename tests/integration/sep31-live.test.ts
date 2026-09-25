@@ -174,7 +174,9 @@ describe.skipIf(!hasAnchor)("SEP-31 live anchor (settlement)", () => {
       const store = new InMemoryIdempotencyStore();
 
       const deps: EngineDeps = {
-        resolver: new StaticRouteResolver(() => adapterFor(c)),
+        resolver: new StaticRouteResolver(() => adapterFor(c), {
+          trustManifestWithoutAttestation: true,
+        }),
         submitter: new StellarSettlementSubmitter({
           signer,
           horizonUrl: env.HORIZON_URL || "https://horizon-testnet.stellar.org",

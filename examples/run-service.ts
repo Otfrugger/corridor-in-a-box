@@ -114,12 +114,15 @@ async function main(): Promise<void> {
   const metrics = new PrometheusMetrics();
 
   const deps: EngineDeps = {
-    resolver: new StaticRouteResolver((corridor) => new Sep31Adapter(corridor, { sep10 })),
+    resolver: new StaticRouteResolver((corridor) => new Sep31Adapter(corridor, { sep10 }), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter,
     idempotency: store,
     audit: new InMemoryAuditLog(),
     logger: consoleLogger,
     metrics,
+    trustManifestWithoutAttestation: true,
   };
 
   const apiKeys = (process.env.CORRIDOR_API_KEYS ?? "")
