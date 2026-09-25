@@ -314,6 +314,16 @@ export async function execute(
       });
     }
 
+    // Every attempt re-verifies. `settling` is reachable only from `verifying`
+    // (see state.ts), so entering the gate here — from `opened` on the first
+    // pass and from `retrying` after a backoff — is what keeps a settle from
+    // ever being submitted without it, by construction rather than by care. The
+    // gate checks themselves (quote validity, balances, anchor status) land in a
+    // follow-up; this wires the state machine only.
+    {
+      const t = await advance("verifying");
+      if (!t.ok) return die(t.error);
+    }
     {
       const t = await advance("settling");
       if (!t.ok) return die(t.error);
