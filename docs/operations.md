@@ -66,7 +66,9 @@ scripts/reference-anchor.sh down           # tear it all down
 
 A corridor run against a sick stack does not fail fast. It reaches `settled`,
 polls for the whole of `recovery.timeout_seconds` (900s by default) and then
-fails with `SETTLEMENT_TIMEOUT`. Every one of those minutes was spent learning
+fails with `SETTLEMENT_TIMEOUT`. (A corridor can tune its own patience with
+`recovery.reconcile: { poll_seconds, stall_polls }`; unset fields fall back to
+`EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls.) Every one of those minutes was spent learning
 something that was knowable beforehand. Run `doctor` first:
 
 ```
@@ -243,11 +245,11 @@ the chain. Verify the belief before closing the run:
   payments (the same check "Crash mid-flight" below prescribes for `settling`)
   before declaring the sender whole.
 
-If an anchor-driven refund path ever lands (a refund-wait state between
-`recovering` and `refunded`), a second, legitimate way into this state appears —
-one where a payment **did** go out and the anchor returned it, hash set. The
-run's trail tells the two apart — and `refund_id`, described below, records
-which refund it was.
+The state machine defines `refund_pending` (between `recovering` and `refunded`)
+but no transition enters it yet — the engine does not call `requestRefund`. When
+a producer lands, a payment that did go out and was returned by the anchor will
+enter `refund_pending` with `stellar_tx_hash` set. The run's trail tells the
+two apart — and `refund_id`, described below, records which refund it was.
 
 ### `refund_id` on the run
 
