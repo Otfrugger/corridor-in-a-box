@@ -301,7 +301,15 @@ export async function execute(
     run.version += 1;
     trail.push("failed");
     await store.put(run);
-    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, routeTrust, checks ? { checks } : undefined);
+    await emitTransition(
+      deps,
+      run,
+      from,
+      now(),
+      `${e.code}: ${e.message}`,
+      routeTrust,
+      checks ? { checks } : undefined,
+    );
     return { ok: false, error: e };
   };
 
@@ -489,6 +497,8 @@ export async function execute(
       try {
         gateResult = await timed("verify", () => deps.gate!.evaluate(gateCtx));
       } catch (e) {
+        // Record the attempt at the gate so the audit trail shows where it died.
+        await advance("verifying");
         return die({
           code: "SETTLEMENT_FAILED",
           message: e instanceof Error ? e.message : String(e),
@@ -500,7 +510,6 @@ export async function execute(
         metrics.increment("corridor.gate.check", {
           name: check.name,
           passed: String(check.passed),
-          corridor: corridor.id,
         });
       }
       {
@@ -538,7 +547,6 @@ export async function execute(
       metrics.increment("corridor.gate.check", {
         name: skippedCheck.name,
         passed: "true",
-        corridor: corridor.id,
       });
       {
         const t = await advance("verifying", { checks: gateChecks });

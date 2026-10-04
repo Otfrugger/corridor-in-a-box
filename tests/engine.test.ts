@@ -62,6 +62,7 @@ function deps(adapterOpts = {}, trustManifestWithoutAttestation = true): EngineD
   return {
     resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
@@ -161,6 +162,7 @@ describe("engine.execute", () => {
       submitter,
       idempotency: store,
       audit,
+      unsafeSkipPreSettleGate: true,
       // No trustManifestWithoutAttestation on deps or opts
     };
 
@@ -229,6 +231,7 @@ describe("engine.execute", () => {
       submitter,
       idempotency: new InMemoryIdempotencyStore(),
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
 
     const r = await execute(intent("existing-settle"), corridor(), d);
@@ -1175,6 +1178,7 @@ describe("state machine", () => {
       },
       reconcilePollMs: 500,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(
       intent("refund-watch-full"),
@@ -1210,6 +1214,7 @@ describe("state machine", () => {
       submitter: createMockSubmitter(),
       idempotency: store,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
     await execute(
       intent("refund-watch-partial"),
@@ -1236,6 +1241,7 @@ describe("state machine", () => {
       },
       reconcilePollMs: 500,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
     await execute(
       intent("refund-watch-timeout"),
@@ -1467,6 +1473,7 @@ describe("per-corridor reconcile config", () => {
       reconcilePollMs: 7,
       stallThreshold: 10,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
     return { d, store };
   }
@@ -1642,6 +1649,7 @@ describe("Quote fee and settlement amount validation", () => {
       },
       idempotency: store,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
 
     const r = await execute(intent("invalid-dp-quote"), corridor(), deps);
@@ -1690,6 +1698,7 @@ describe("Quote fee and settlement amount validation", () => {
       idempotency: store,
       audit,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
 
     const r = await execute(intent("audit-fee-key"), corridor(), deps);
@@ -1785,9 +1794,12 @@ describe("pre-settle gate enforcement", () => {
   it("fails fast with ENGINE_MISCONFIGURED and creates no run record when neither gate nor opt-out is provided", async () => {
     const store = new InMemoryIdempotencyStore();
     const r = await execute(intent("no-gate"), corridor(), {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter(),
       idempotency: store,
+      trustManifestWithoutAttestation: true,
     });
 
     expect(r.ok).toBe(false);
@@ -1804,9 +1816,12 @@ describe("pre-settle gate enforcement", () => {
     const audit = new InMemoryAuditLog();
     const warnings: string[] = [];
     const r = await execute(intent("skipped-gate"), corridor(), {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
+      trustManifestWithoutAttestation: true,
       audit,
       unsafeSkipPreSettleGate: true,
       logger: {
@@ -1851,7 +1866,9 @@ describe("pre-settle gate enforcement", () => {
     };
 
     const r = await execute(intent("failing-gate"), corridor(), {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: async () => {
           submitCalled = true;
@@ -1860,6 +1877,7 @@ describe("pre-settle gate enforcement", () => {
         refund: async () => fail("SETTLEMENT_FAILED", "not reached", { retryable: false }),
       },
       idempotency: store,
+      trustManifestWithoutAttestation: true,
       audit,
       gate: failingGate,
     });
@@ -1904,9 +1922,12 @@ describe("pre-settle gate enforcement", () => {
     };
 
     const r = await execute(intent("gate-retry"), corridorWith({ max_retries: 2 }), {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter,
       idempotency: new InMemoryIdempotencyStore(),
+      trustManifestWithoutAttestation: true,
       gate: dynamicGate,
       sleep: async () => {},
     });
