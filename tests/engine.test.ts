@@ -62,7 +62,6 @@ function deps(adapterOpts = {}, trustManifestWithoutAttestation = true): EngineD
   return {
     resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
       trustManifestWithoutAttestation: true,
-      unsafeSkipPreSettleGate: true,
     }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
