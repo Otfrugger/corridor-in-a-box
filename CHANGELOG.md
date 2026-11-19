@@ -7,6 +7,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — reference send app flow, route tiers, quote countdown, and dynamic recipient fields ([#685](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/685), [#686](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/686), [#687](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/687), [#688](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/688))
+
+- `web/components/send/AmountDestinationForm.tsx`: amount and destination form with validation rejecting invalid, non-positive, or empty amounts with clear error messages ([#685](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/685)).
+- `web/components/send/RouteOptionsList.tsx`: route options display showing ranked options with RFC 0004 §2 price labels (`locked`, `indicative`, `estimated`) and human-readable routing reasons; labels are never merged or hidden ([#686](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/686)).
+- `web/components/send/LockedPriceCountdown.tsx`: live countdown timer for locked quotes, ensuring expired quotes cannot be sent ([#687](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/687)).
+- `web/components/send/RecipientDetailsForm.tsx`: dynamic recipient form driven by each destination anchor's `/sep31/info` and SEP-12 requirements without hardcoding, updating fields dynamically when switching routes ([#688](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/688)).
+- `web/app/send/page.tsx` & `web/components/send/SendApp.tsx`: `/send` route with permanent testnet banner ("Testnet only — no real money").
+- Tests covering amount validation, route labels, quote countdown, and dynamic recipient fields (`tests/web-send-*.test.ts`).
+
 ### Fixed — stale documentation and comments
 
 - Docs said no transition enters `refund_pending` and that `refunded` is reachable only when
