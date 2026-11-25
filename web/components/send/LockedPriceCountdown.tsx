@@ -1,118 +1,69 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Clock, AlertTriangle, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { Badge } from "@/components/ui/Badge";
+import { clsx } from "clsx";
+import { Clock } from "lucide-react";
+import { SendErrorState } from "@/components/SendErrorState";
 import {
-  formatRemainingSeconds,
+  QUOTE_WARNING_SECONDS,
+  formatCountdown,
+  isQuoteExpired,
+  quoteSecondsLeft,
   type RouteOption,
 } from "@/lib/send";
 
 interface LockedPriceCountdownProps {
-  route: RouteOption;
-  onRefreshQuote?: () => void;
-  onExpireChange?: (isExpired: boolean) => void;
+  option: RouteOption;
+  /** The shared clock from the send app, the same one that enables Send. */
+  nowMs: number;
+  /** Asks the planner again for a fresh price. */
+  onRefresh?: () => void;
 }
 
-export function LockedPriceCountdown({
-  route,
-  onRefreshQuote,
-  onExpireChange,
-}: LockedPriceCountdownProps) {
-  const isLocked = route.label === "locked";
-  const [now, setNow] = useState(() => Date.now());
+/**
+ * Step 3 (#687): the time left on a locked price. Renders nothing for an
+ * indicative or estimated price, which has no expiry. Once a locked price runs
+ * out it gives way to the expired-price screen, and the send app disables Send.
+ *
+ * The digits tick every second but are not announced each time (role="timer"
+ * is not a live region); the warning and the expiry are announced once.
+ */
+export function LockedPriceCountdown({ option, nowMs, onRefresh }: LockedPriceCountdownProps) {
+  const left = quoteSecondsLeft(option, nowMs);
+  if (left === undefined) return null;
 
-  useEffect(() => {
-    if (!isLocked || !route.expiresAt) return;
-
-    const timer = setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [isLocked, route.expiresAt]);
-
-  const expiryMs = isLocked && route.expiresAt ? new Date(route.expiresAt).getTime() : 0;
-  const remainingSecs = expiryMs > now ? Math.floor((expiryMs - now) / 1000) : 0;
-  const expired = isLocked && expiryMs > 0 && expiryMs <= now;
-
-  useEffect(() => {
-    onExpireChange?.(expired);
-  }, [expired, onExpireChange]);
-
-  if (!isLocked) {
-    return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2 text-xs text-secondary-text">
-        <Clock size={15} className="text-secondary-text" />
-        <span>
-          {route.label === "indicative"
-            ? "Indicative price — final rate confirmed upon settlement."
-            : "Estimated price — based on historical rates."}
-        </span>
-      </div>
-    );
+  if (isQuoteExpired(option, nowMs)) {
+    return <SendErrorState error={{ kind: "quote_expired" }} onAction={onRefresh} />;
   }
 
-  if (expired) {
-    return (
-      <div
-        role="alert"
-        className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-300 bg-red-50 p-3 text-red-900 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
-      >
-        <div className="flex items-center gap-2 text-xs font-semibold">
-          <AlertTriangle size={16} className="text-red-600 dark:text-red-400" />
-          <span>Locked price expired. Expired quotes cannot be sent.</span>
-        </div>
-
-        {onRefreshQuote && (
-          <Button
-            type="button"
-            size="sm"
-            variant="secondary"
-            onClick={onRefreshQuote}
-            className="flex items-center gap-1.5 text-xs font-medium"
-          >
-            <RefreshCw size={13} />
-            <span>Get a new price</span>
-          </Button>
-        )}
-      </div>
-    );
-  }
-
-  const isWarning = remainingSecs <= 15;
-
+  const warning = left <= QUOTE_WARNING_SECONDS;
   return (
     <div
-      className={`flex items-center justify-between rounded-lg border px-3 py-2.5 transition-colors ${
-        isWarning
-          ? "border-yellow-400 bg-yellow-50 dark:border-yellow-800 dark:bg-yellow-950/30"
-          : "border-green-300 bg-green-50 dark:border-green-900/40 dark:bg-green-950/20"
-      }`}
+      className={clsx(
+        "flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3",
+        warning
+          ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-100"
+          : "border-border bg-bg-subtle",
+      )}
     >
-      <div className="flex items-center gap-2">
-        <Clock
-          size={16}
-          className={isWarning ? "text-yellow-600 dark:text-yellow-400" : "text-green-600 dark:text-green-400"}
-        />
-        <div className="flex flex-col">
-          <span className="text-xs font-medium text-primary-text">
-            Guaranteed Rate Locked
+      <div className="flex min-w-0 items-center gap-2.5">
+        <Clock size={16} aria-hidden className="shrink-0" />
+        <p className="text-sm">
+          {warning ? "This price is about to expire." : "This price is locked."}{" "}
+          <span className={warning ? "" : "text-secondary-text"}>
+            Send before the timer runs out.
           </span>
-          <span className="text-[11px] text-secondary-text">
-            SEP-38 firm quote expires when the countdown reaches zero.
-          </span>
-        </div>
+        </p>
       </div>
-
-      <div className="flex items-center gap-2">
-        <Badge variant={isWarning ? "warning" : "success"}>
-          <span className="font-mono text-xs font-bold tracking-wider">
-            {formatRemainingSeconds(remainingSecs)}
-          </span>
-        </Badge>
-      </div>
+      <p
+        role="timer"
+        aria-label="Time left on the locked price"
+        className="font-mono text-lg font-semibold tabular-nums"
+      >
+        {formatCountdown(left)}
+      </p>
+      <p aria-live="polite" className="sr-only">
+        {warning ? `Less than ${QUOTE_WARNING_SECONDS} seconds left on the locked price.` : ""}
+      </p>
     </div>
   );
 }

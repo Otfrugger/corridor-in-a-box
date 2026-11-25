@@ -1,190 +1,212 @@
 "use client";
 
-import { useId, useState } from "react";
-import { Card } from "@/components/ui/Card";
+import { useId, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
-import { validateSendAmount } from "@/lib/send";
+import { validateSendAmount, type Destination } from "@/lib/send";
+import { errorClass, hintClass, inputClass, labelClass } from "./field-styles";
 
 export interface AmountDestinationValues {
   amount: string;
   sourceAsset: string;
-  destCountry: string;
-  destCurrency: string;
+  destination: Destination;
 }
 
 interface AmountDestinationFormProps {
-  initialValues?: Partial<AmountDestinationValues>;
+  /** Where payments can go, read from the corridor manifests by the page. */
+  destinations: readonly Destination[];
+  sourceAssets: readonly string[];
+  /** Lets the parent move focus back to the amount, for example from an error screen. */
+  amountId: string;
   onSubmit: (values: AmountDestinationValues) => void;
-  isLoading?: boolean;
+  busy?: boolean;
 }
 
-const COUNTRIES = [
-  { code: "US", name: "United States (USD)", currency: "USD" },
-  { code: "NG", name: "Nigeria (NGN)", currency: "NGN" },
-  { code: "MX", name: "Mexico (MXN)", currency: "MXN" },
-  { code: "ZA", name: "South Africa (ZAR)", currency: "ZAR" },
-  { code: "CN", name: "China (CNY)", currency: "CNY" },
-];
+const regionNames =
+  typeof Intl !== "undefined" && "DisplayNames" in Intl
+    ? new Intl.DisplayNames(["en"], { type: "region" })
+    : undefined;
 
-const SOURCE_ASSETS = ["USDC", "XLM"];
+function countryName(code: string): string {
+  try {
+    return regionNames?.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
 
+/** Step 1 (#685): how much to send, in what, and where it should arrive. */
 export function AmountDestinationForm({
-  initialValues,
+  destinations,
+  sourceAssets,
+  amountId,
   onSubmit,
-  isLoading,
+  busy,
 }: AmountDestinationFormProps) {
-  const [amount, setAmount] = useState(initialValues?.amount ?? "100.00");
-  const [sourceAsset, setSourceAsset] = useState(initialValues?.sourceAsset ?? "USDC");
-  const [destCountry, setDestCountry] = useState(initialValues?.destCountry ?? "NG");
+  const uid = useId();
+  const ids = {
+    amountError: `${uid}-amount-error`,
+    amountHint: `${uid}-amount-hint`,
+    asset: `${uid}-asset`,
+    country: `${uid}-country`,
+    currency: `${uid}-currency`,
+  };
+
+  const countries = [...new Set(destinations.map((d) => d.country))];
+  const [amount, setAmount] = useState("");
+  const [sourceAsset, setSourceAsset] = useState(sourceAssets[0] ?? "");
+  const [country, setCountry] = useState(countries[0] ?? "");
+  const currencies = destinations.filter((d) => d.country === country).map((d) => d.currency);
+  const [currency, setCurrency] = useState(currencies[0] ?? "");
   const [amountError, setAmountError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
 
-  const uid = useId();
-  const ids = {
-    amount: `${uid}-amount`,
-    amountError: `${uid}-amount-error`,
-    sourceAsset: `${uid}-source-asset`,
-    destCountry: `${uid}-dest-country`,
-    destCurrency: `${uid}-dest-currency`,
-  };
+  const noDestinations = destinations.length === 0 || sourceAssets.length === 0;
 
-  const selectedCountry = COUNTRIES.find((c) => c.code === destCountry) ?? COUNTRIES[0];
-
-  function handleAmountChange(val: string) {
-    setAmount(val);
-    if (touched) {
-      const check = validateSendAmount(val);
-      setAmountError(check.valid ? null : (check.error ?? "Invalid amount"));
-    }
+  function check(value: string): boolean {
+    const result = validateSendAmount(value);
+    setAmountError(result.valid ? null : result.error);
+    return result.valid;
   }
 
-  function handleBlur() {
-    setTouched(true);
-    const check = validateSendAmount(amount);
-    setAmountError(check.valid ? null : (check.error ?? "Invalid amount"));
+  function handleCountry(next: string) {
+    setCountry(next);
+    const first = destinations.find((d) => d.country === next);
+    setCurrency(first?.currency ?? "");
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setTouched(true);
-    const check = validateSendAmount(amount);
-    if (!check.valid) {
-      setAmountError(check.error ?? "Invalid amount");
+    const result = validateSendAmount(amount);
+    if (!result.valid) {
+      setAmountError(result.error);
+      document.getElementById(amountId)?.focus();
       return;
     }
     setAmountError(null);
-    onSubmit({
-      amount,
-      sourceAsset,
-      destCountry,
-      destCurrency: selectedCountry.currency,
-    });
+    onSubmit({ amount: result.amount, sourceAsset, destination: { country, currency } });
   }
 
   return (
-    <Card className="flex flex-col gap-5">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight text-primary-text">
-          1. Amount &amp; Destination
+    <section aria-labelledby={`${uid}-title`} className="flex flex-col gap-5">
+      <header>
+        <h2 id={`${uid}-title`} className="text-lg font-semibold tracking-tight">
+          Amount and destination
         </h2>
-        <p className="mt-1 text-xs text-secondary-text">
-          Specify how much you are sending and where the funds should be delivered.
+        <p className="mt-1 max-w-prose text-sm text-secondary-text">
+          How much to send, and the country and currency it should arrive in.
         </p>
-      </div>
+      </header>
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {/* Amount input */}
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor={ids.amount} className="text-xs font-medium text-secondary-text">
-              Send Amount
-            </label>
-            <div className="relative">
+      {noDestinations ? (
+        <p className="rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-secondary-text">
+          No testnet corridor is configured, so there is nowhere to send to yet.
+        </p>
+      ) : (
+        <form noValidate onSubmit={handleSubmit} className="flex flex-col gap-5">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <label htmlFor={amountId} className={labelClass}>
+                Amount
+              </label>
               <input
-                id={ids.amount}
+                id={amountId}
+                name="amount"
                 type="text"
                 inputMode="decimal"
+                autoComplete="off"
+                spellCheck={false}
                 value={amount}
-                onChange={(e) => handleAmountChange(e.target.value)}
-                onBlur={handleBlur}
+                onChange={(e) => {
+                  setAmount(e.target.value);
+                  if (touched) check(e.target.value);
+                }}
+                onBlur={() => {
+                  if (amount.trim() === "" && !touched) return;
+                  setTouched(true);
+                  check(amount);
+                }}
                 aria-invalid={amountError !== null}
-                aria-describedby={amountError ? ids.amountError : undefined}
-                className={`w-full rounded-lg border px-3 py-2 text-sm bg-background text-primary-text transition-colors focus:outline-none focus:ring-2 ${
-                  amountError
-                    ? "border-red-500 focus:ring-red-500/30"
-                    : "border-border focus:ring-blue-500/30"
-                }`}
-                placeholder="0.00"
+                aria-describedby={amountError ? `${ids.amountError} ${ids.amountHint}` : ids.amountHint}
+                className={inputClass(amountError !== null, "tabular-nums")}
+                placeholder="25.00"
               />
-            </div>
-            {amountError && (
-              <p id={ids.amountError} role="alert" className="text-xs font-medium text-red-500">
-                {amountError}
+              <p id={ids.amountHint} className={hintClass}>
+                Up to 7 decimal places. Test tokens only.
               </p>
-            )}
+              <div aria-live="polite">
+                {amountError && (
+                  <p id={ids.amountError} className={errorClass}>
+                    {amountError}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <label htmlFor={ids.asset} className={labelClass}>
+                Send in
+              </label>
+              <select
+                id={ids.asset}
+                value={sourceAsset}
+                onChange={(e) => setSourceAsset(e.target.value)}
+                className={inputClass(false)}
+              >
+                {sourceAssets.map((asset) => (
+                  <option key={asset} value={asset}>
+                    {asset}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          {/* Source Asset */}
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor={ids.sourceAsset} className="text-xs font-medium text-secondary-text">
-              Source Asset
-            </label>
-            <select
-              id={ids.sourceAsset}
-              value={sourceAsset}
-              onChange={(e) => setSourceAsset(e.target.value)}
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-primary-text focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-            >
-              {SOURCE_ASSETS.map((asset) => (
-                <option key={asset} value={asset}>
-                  {asset} (Stellar Testnet)
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <label htmlFor={ids.country} className={labelClass}>
+                Destination country
+              </label>
+              <select
+                id={ids.country}
+                value={country}
+                onChange={(e) => handleCountry(e.target.value)}
+                className={inputClass(false)}
+              >
+                {countries.map((code) => (
+                  <option key={code} value={code}>
+                    {countryName(code)}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {/* Destination Country */}
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor={ids.destCountry} className="text-xs font-medium text-secondary-text">
-              Destination Country
-            </label>
-            <select
-              id={ids.destCountry}
-              value={destCountry}
-              onChange={(e) => setDestCountry(e.target.value)}
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-primary-text focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-            >
-              {COUNTRIES.map((country) => (
-                <option key={country.code} value={country.code}>
-                  {country.name}
-                </option>
-              ))}
-            </select>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <label htmlFor={ids.currency} className={labelClass}>
+                Arrives in
+              </label>
+              <select
+                id={ids.currency}
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className={inputClass(false)}
+              >
+                {currencies.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          {/* Destination Currency (Derived) */}
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor={ids.destCurrency} className="text-xs font-medium text-secondary-text">
-              Payout Currency
-            </label>
-            <input
-              id={ids.destCurrency}
-              type="text"
-              readOnly
-              value={selectedCountry.currency}
-              className="w-full rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm text-secondary-text cursor-not-allowed"
-            />
+          <div>
+            <Button type="submit" disabled={busy} className="active:translate-y-px">
+              {busy ? "Finding routes…" : "Find routes"}
+            </Button>
           </div>
-        </div>
-
-        <div className="pt-2">
-          <Button type="submit" variant="primary" disabled={isLoading} className="w-full sm:w-auto">
-            {isLoading ? "Finding Routes..." : "Find Route Options"}
-          </Button>
-        </div>
-      </form>
-    </Card>
+        </form>
+      )}
+    </section>
   );
 }

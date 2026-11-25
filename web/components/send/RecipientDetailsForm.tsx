@@ -1,146 +1,186 @@
 "use client";
 
-import { useId } from "react";
-import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
 import type { ReceiverField } from "@/lib/send";
+import { errorClass, hintClass, inputClass, labelClass } from "./field-styles";
+
+export type FieldsStatus = "loading" | "ready" | "error" | "unavailable";
 
 interface RecipientDetailsFormProps {
-  anchorName: string;
-  fields: ReceiverField[];
-  values: Record<string, string>;
-  errors: Record<string, string>;
-  onChange: (values: Record<string, string>) => void;
+  /** The receiving anchor, so the sender knows who is asking. */
+  anchor: string;
+  status: FieldsStatus;
+  fields: readonly ReceiverField[];
+  values: Readonly<Record<string, string>>;
+  errors: Readonly<Record<string, string>>;
+  onChange: (name: string, value: string) => void;
+  onRetry?: () => void;
+  /** Prefix for input ids, so the send app can move focus to the first field with an error. */
+  idPrefix: string;
+}
+
+function optionalMark(optional: boolean) {
+  return optional ? (
+    <span className="ml-1.5 font-normal text-secondary-text">(optional)</span>
+  ) : null;
+}
+
+export function fieldInputId(idPrefix: string, name: string): string {
+  return `${idPrefix}-${name}`;
 }
 
 /**
- * Renders the receiver fields the chosen anchor requires (from its /sep31/info and SEP-12).
- * Strictly dynamic: no hardcoded field list. Changing the route changes the fields immediately.
+ * Step 4 (#688): the details the chosen route's anchor asks for. There is no
+ * field list here: every input comes from `fields`, which the send app loads
+ * from the receiving anchor for the selected route, so a different route shows
+ * different fields.
  */
 export function RecipientDetailsForm({
-  anchorName,
+  anchor,
+  status,
   fields,
   values,
   errors,
   onChange,
+  onRetry,
+  idPrefix,
 }: RecipientDetailsFormProps) {
-  const uid = useId();
-
-  function handleFieldChange(name: string, val: string) {
-    onChange({
-      ...values,
-      [name]: val,
-    });
-  }
-
-  if (fields.length === 0) {
-    return (
-      <Card className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold tracking-tight text-primary-text">
-          3. Recipient Details
-        </h2>
-        <p className="text-xs text-secondary-text">
-          This anchor requires no additional receiver payout fields.
-        </p>
-      </Card>
-    );
-  }
-
+  const titleId = `${idPrefix}-title`;
   return (
-    <Card className="flex flex-col gap-4">
-      <div>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold tracking-tight text-primary-text">
-            3. Recipient Details
-          </h2>
-          <span className="text-xs font-medium text-secondary-text">
-            Required by <span className="text-primary-text">{anchorName}</span>
-          </span>
-        </div>
-        <p className="mt-1 text-xs text-secondary-text">
-          Fields are dynamically populated from the receiving anchor&apos;s <code>/sep31/info</code> and
-          SEP-12 schema. Changing the route dynamically updates these requirements.
+    <section aria-labelledby={titleId} aria-busy={status === "loading"} className="flex flex-col gap-4">
+      <header>
+        <h2 id={titleId} className="text-lg font-semibold tracking-tight">
+          Recipient details
+        </h2>
+        <p className="mt-1 max-w-prose text-sm break-words text-secondary-text">
+          Asked for by <span className="font-medium text-primary-text">{anchor}</span>. Only what
+          this anchor requires, nothing more.
         </p>
-      </div>
+      </header>
 
-      <div className="flex flex-col gap-3.5">
-        {fields.map((field) => {
-          const fieldId = `${uid}-field-${field.name}`;
-          const errorId = `${uid}-error-${field.name}`;
-          const descId = `${uid}-desc-${field.name}`;
-          const err = errors[field.name];
-          const val = values[field.name] ?? "";
+      {status === "loading" && (
+        <div className="flex flex-col gap-3" aria-hidden>
+          {[0, 1].map((i) => (
+            <div key={i} className="flex flex-col gap-1.5">
+              <div className="h-4 w-32 animate-pulse rounded bg-border" />
+              <div className="h-10 w-full animate-pulse rounded-lg bg-bg-subtle" />
+            </div>
+          ))}
+        </div>
+      )}
+      {status === "loading" && <p className="sr-only">Loading the fields this anchor asks for.</p>}
 
-          return (
-            <div key={field.name} className="flex flex-col gap-1">
-              <div className="flex items-center justify-between">
-                <label htmlFor={fieldId} className="text-xs font-medium text-secondary-text">
-                  {field.label} {!field.optional && <span className="text-red-500">*</span>}
-                </label>
-                {field.optional && (
-                  <span className="text-[11px] text-secondary-text/80 font-normal">Optional</span>
+      {status === "unavailable" && (
+        <p className="rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-secondary-text">
+          This app can't read this anchor's requirements yet, so it can't show the recipient
+          fields.
+        </p>
+      )}
+
+      {status === "error" && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3"
+        >
+          <p className="text-sm">Couldn't load what this anchor asks for.</p>
+          {onRetry && (
+            <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
+              Try again
+            </Button>
+          )}
+        </div>
+      )}
+
+      {status === "ready" && fields.length === 0 && (
+        <p className="text-sm text-secondary-text">This anchor needs no recipient details.</p>
+      )}
+
+      {status === "ready" && fields.length > 0 && (
+        <div className="flex flex-col gap-4">
+          {fields.map((field) => {
+            const id = fieldInputId(idPrefix, field.name);
+            const hintId = `${id}-hint`;
+            const errorId = `${id}-error`;
+            const error = errors[field.name];
+            const describedBy =
+              [error ? errorId : null, field.description ? hintId : null]
+                .filter(Boolean)
+                .join(" ") || undefined;
+            const value = values[field.name] ?? "";
+
+            return (
+              <div key={field.name} className="flex min-w-0 flex-col gap-1.5">
+                {field.type === "binary" ? (
+                  <p id={`${id}-label`} className={labelClass}>
+                    {field.label}
+                    {optionalMark(field.optional)}
+                  </p>
+                ) : (
+                  <label htmlFor={id} className={labelClass}>
+                    {field.label}
+                    {optionalMark(field.optional)}
+                  </label>
+                )}
+
+                {field.type === "binary" ? (
+                  <p
+                    id={id}
+                    tabIndex={-1}
+                    aria-labelledby={`${id}-label`}
+                    aria-describedby={describedBy}
+                    className="rounded-lg border border-dashed border-border px-3 py-2 text-sm text-secondary-text"
+                  >
+                    This is a document upload. This app can't send documents yet.
+                  </p>
+                ) : field.choices ? (
+                  <select
+                    id={id}
+                    name={field.name}
+                    value={value}
+                    required={!field.optional}
+                    onChange={(e) => onChange(field.name, e.target.value)}
+                    aria-invalid={Boolean(error)}
+                    aria-describedby={describedBy}
+                    className={inputClass(Boolean(error))}
+                  >
+                    <option value="">Choose…</option>
+                    {field.choices.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    id={id}
+                    name={field.name}
+                    type={field.type === "date" ? "date" : "text"}
+                    inputMode={field.type === "number" ? "decimal" : undefined}
+                    autoComplete="off"
+                    value={value}
+                    required={!field.optional}
+                    onChange={(e) => onChange(field.name, e.target.value)}
+                    aria-invalid={Boolean(error)}
+                    aria-describedby={describedBy}
+                    className={inputClass(Boolean(error))}
+                  />
+                )}
+
+                {field.description && (
+                  <p id={hintId} className={hintClass}>
+                    {field.description}
+                  </p>
+                )}
+                {error && (
+                  <p id={errorId} className={errorClass}>
+                    {error}
+                  </p>
                 )}
               </div>
-
-              {field.choices && field.choices.length > 0 ? (
-                <select
-                  id={fieldId}
-                  value={val}
-                  onChange={(e) => handleFieldChange(field.name, e.target.value)}
-                  aria-invalid={!!err}
-                  aria-describedby={
-                    [err ? errorId : undefined, field.description ? descId : undefined]
-                      .filter(Boolean)
-                      .join(" ") || undefined
-                  }
-                  className={`w-full rounded-lg border bg-background px-3 py-2 text-sm text-primary-text focus:outline-none focus:ring-2 ${
-                    err
-                      ? "border-red-500 focus:ring-red-500/30"
-                      : "border-border focus:ring-blue-500/30"
-                  }`}
-                >
-                  <option value="">Select an option</option>
-                  {field.choices.map((choice) => (
-                    <option key={choice} value={choice}>
-                      {choice}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  id={fieldId}
-                  type={field.type === "number" ? "number" : "text"}
-                  value={val}
-                  placeholder={field.placeholder ?? ""}
-                  onChange={(e) => handleFieldChange(field.name, e.target.value)}
-                  aria-invalid={!!err}
-                  aria-describedby={
-                    [err ? errorId : undefined, field.description ? descId : undefined]
-                      .filter(Boolean)
-                      .join(" ") || undefined
-                  }
-                  className={`w-full rounded-lg border px-3 py-2 text-sm bg-background text-primary-text focus:outline-none focus:ring-2 ${
-                    err
-                      ? "border-red-500 focus:ring-red-500/30"
-                      : "border-border focus:ring-blue-500/30"
-                  }`}
-                />
-              )}
-
-              {field.description && (
-                <p id={descId} className="text-[11px] text-secondary-text">
-                  {field.description}
-                </p>
-              )}
-
-              {err && (
-                <p id={errorId} role="alert" className="text-xs font-medium text-red-500">
-                  {err}
-                </p>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </Card>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }

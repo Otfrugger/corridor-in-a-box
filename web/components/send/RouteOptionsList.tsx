@@ -1,146 +1,163 @@
 "use client";
 
+import { useId } from "react";
+import { clsx } from "clsx";
 import { Badge } from "@/components/ui/Badge";
-import { Card } from "@/components/ui/Card";
-import { PRICE_LABELS, type PriceLabel, type RouteOption } from "@/lib/send";
+import {
+  PRICE_LABEL_MEANING,
+  currencyCode,
+  describePrice,
+  formatAmount,
+  formatMoney,
+  isQuoteExpired,
+  plainReason,
+  routeKey,
+  type PriceLabel,
+  type RouteOption,
+} from "@/lib/send";
 
 interface RouteOptionsListProps {
-  options: RouteOption[];
-  selectedRouteId?: string;
-  onSelectRoute: (route: RouteOption) => void;
+  /** Ranked best first, as the planner returned them. The list keeps that order. */
+  options: readonly RouteOption[];
+  selectedKey?: string;
+  onSelect: (option: RouteOption) => void;
+  /** The shared clock, so every locked price counts down in step with the Send button. */
+  nowMs: number;
+  /** What the sender pays in, for the rate line. */
+  sourceAsset: string;
+  guaranteeEstimates?: boolean;
 }
 
+const BADGE: Record<PriceLabel, "success" | "info" | "warning"> = {
+  locked: "success",
+  indicative: "info",
+  estimated: "warning",
+};
+
+/**
+ * Step 2 (#686): the ranked routes. Each option shows its own price label and
+ * RFC 0004 §2 wording, and its reasons in plain words. Labels are never merged
+ * or hidden: every option carries its own, whatever the others say.
+ *
+ * A native radio group, so arrow keys move between options and Tab leaves the
+ * list, with no custom key handling.
+ */
 export function RouteOptionsList({
   options,
-  selectedRouteId,
-  onSelectRoute,
+  selectedKey,
+  onSelect,
+  nowMs,
+  sourceAsset,
+  guaranteeEstimates,
 }: RouteOptionsListProps) {
-  if (options.length === 0) {
-    return (
-      <Card className="p-6 text-center">
-        <p className="text-sm text-secondary-text">
-          No route options found for the specified amount and destination.
-        </p>
-      </Card>
-    );
-  }
-
-  function getBadgeVariant(label: PriceLabel): "success" | "info" | "warning" {
-    switch (label) {
-      case "locked":
-        return "success";
-      case "indicative":
-        return "info";
-      case "estimated":
-        return "warning";
-    }
-  }
+  const uid = useId();
+  const name = `${uid}-route`;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight text-primary-text">
-          2. Route Options
-        </h2>
-        <p className="mt-1 text-xs text-secondary-text">
-          Ranked routes from the router. Price labels follow RFC 0004 §2 and are never merged or
-          hidden.
-        </p>
-      </div>
+    <fieldset className="flex min-w-0 flex-col gap-3">
+      <legend className="mb-1">
+        <span className="block text-lg font-semibold tracking-tight">Pick a route</span>
+        <span className="mt-1 block max-w-prose text-sm text-secondary-text">
+          Best first. Each price says whether it is locked, indicative or estimated.
+        </span>
+      </legend>
 
-      <div className="grid grid-cols-1 gap-3.5" aria-label="Route options">
+      <ol className="flex flex-col gap-3">
         {options.map((option, index) => {
-          const isSelected = option.id === selectedRouteId;
-          const meta = PRICE_LABELS[option.label];
-          const badgeVariant = getBadgeVariant(option.label);
-
+          const key = routeKey(option);
+          const selected = key === selectedKey;
+          const expired = isQuoteExpired(option, nowMs);
+          const nameId = `${uid}-name-${index}`;
+          const labelId = `${uid}-label-${index}`;
+          const headlineId = `${uid}-headline-${index}`;
+          const meaningId = `${uid}-meaning-${index}`;
+          const dest = currencyCode(option.recipientGets.asset);
           return (
-            <label
-              key={option.id}
-              aria-label={`Select route option ${option.anchorName} (${option.label})`}
-              className="block cursor-pointer"
-            >
-              <span className="sr-only">
-                Select route {option.anchorName} with {option.label} price
-              </span>
-              <input
-                type="radio"
-                name="route-selection"
-                value={option.id}
-                checked={isSelected}
-                onChange={() => onSelectRoute(option)}
-                className="sr-only"
-              />
-              <Card
-                selected={isSelected}
-                className="transition-all hover:border-blue-400 focus-within:ring-2 focus-within:ring-blue-500"
+            <li key={key}>
+              <label
+                className={clsx(
+                  "flex cursor-pointer gap-3 rounded-xl border bg-background p-4 transition-colors focus-within:border-accent",
+                  selected
+                    ? "border-accent ring-1 ring-accent"
+                    : "border-border hover:border-secondary-text/60",
+                )}
               >
-                <div className="flex flex-col gap-3">
-                  {/* Header row: Rank, Anchor Name, and distinct Price Label Badge */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-bg-subtle text-xs font-semibold text-secondary-text">
-                        {index + 1}
-                      </span>
-                      <span className="font-semibold text-primary-text">{option.anchorName}</span>
-                    </div>
-
-                    {/* Price Label Badge: exact RFC 0004 §2 label, never merged or hidden */}
-                    <div className="flex items-center gap-1.5">
-                      <Badge variant={badgeVariant}>
-                        {option.label}
-                      </Badge>
-                    </div>
+                <input
+                  type="radio"
+                  name={name}
+                  value={key}
+                  checked={selected}
+                  onChange={() => onSelect(option)}
+                  aria-labelledby={`${nameId} ${labelId} ${headlineId}`}
+                  aria-describedby={meaningId}
+                  className="mt-1 size-4 shrink-0 accent-[var(--accent)]"
+                />
+                <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="text-xs font-semibold tabular-nums text-secondary-text">
+                      #{index + 1}
+                    </span>
+                    <span id={nameId} className="min-w-0 font-medium break-words">
+                      {option.receivingDomain}
+                    </span>
+                    <span id={labelId}>
+                      <Badge variant={BADGE[option.price.label]}>{option.price.label}</Badge>
+                    </span>
                   </div>
 
-                  {/* Amounts & Rates Grid */}
-                  <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-                    <div>
-                      <span className="text-secondary-text">Recipient Gets:</span>
-                      <div className="text-sm font-bold text-primary-text">
-                        {option.destAmount} {option.destCurrency}
+                  <p
+                    id={headlineId}
+                    className={clsx(
+                      "text-base font-semibold tabular-nums",
+                      expired && "text-secondary-text line-through decoration-1",
+                    )}
+                  >
+                    {describePrice(option, nowMs, { guaranteeEstimates })}
+                  </p>
+
+                  <div className="flex flex-col gap-2.5">
+                    <p id={meaningId} className="max-w-prose text-sm text-secondary-text">
+                      {PRICE_LABEL_MEANING[option.price.label]}
+                    </p>
+
+                    <dl className="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+                      <div className="min-w-0">
+                        <dt className="text-xs text-secondary-text">Rate</dt>
+                        <dd className="tabular-nums break-words">
+                          1 {sourceAsset} = {formatAmount(option.price.rate)} {dest}
+                        </dd>
                       </div>
-                    </div>
-                    <div>
-                      <span className="text-secondary-text">Exchange Rate:</span>
-                      <div className="font-medium text-primary-text">{option.exchangeRate}</div>
-                    </div>
-                    <div>
-                      <span className="text-secondary-text">Estimated Fee:</span>
-                      <div className="font-medium text-primary-text">{option.fee}</div>
-                    </div>
-                    <div>
-                      <span className="text-secondary-text">Delivery Speed:</span>
-                      <div className="font-medium text-primary-text">{option.estimatedDelivery}</div>
-                    </div>
-                  </div>
+                      <div className="min-w-0">
+                        <dt className="text-xs text-secondary-text">Fees</dt>
+                        <dd className="tabular-nums break-words">{formatMoney(option.fees)}</dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-xs text-secondary-text">Track record</dt>
+                        <dd className="tabular-nums">
+                          {Math.round(Math.min(1, Math.max(0, option.reliability)) * 100)}%
+                        </dd>
+                      </div>
+                    </dl>
 
-                  {/* RFC 0004 §2 Tier Description */}
-                  <div className="rounded-lg bg-bg-subtle p-2 text-xs text-secondary-text">
-                    <span className="font-medium text-primary-text">{meta.title}: </span>
-                    {meta.description}
+                    {option.reasons.length > 0 && (
+                      <div className="text-sm">
+                        <p className="text-xs text-secondary-text">Why it ranks here</p>
+                        <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                          {option.reasons.map((reason, i) => (
+                            <li key={`${i}-${reason}`} className="break-words">
+                              {plainReason(reason)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
-
-                  {/* Reasons List */}
-                  {option.reasons && option.reasons.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs text-secondary-text">
-                      <span className="font-medium text-primary-text">Routing reasons:</span>
-                      {option.reasons.map((reason, i) => (
-                        <span
-                          key={i}
-                          className="inline-flex items-center rounded-md bg-border/40 px-2 py-0.5 text-xs text-secondary-text"
-                        >
-                          {reason}
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </div>
-              </Card>
-            </label>
+              </label>
+            </li>
           );
         })}
-      </div>
-    </div>
+      </ol>
+    </fieldset>
   );
 }

@@ -7,14 +7,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
-### Added — reference send app flow, route tiers, quote countdown, and dynamic recipient fields ([#685](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/685), [#686](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/686), [#687](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/687), [#688](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/688))
+### Added — send app: amount form, route options, locked-price countdown and recipient fields ([#685](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/685), [#686](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/686), [#687](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/687), [#688](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/688))
 
-- `web/components/send/AmountDestinationForm.tsx`: amount and destination form with validation rejecting invalid, non-positive, or empty amounts with clear error messages ([#685](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/685)).
-- `web/components/send/RouteOptionsList.tsx`: route options display showing ranked options with RFC 0004 §2 price labels (`locked`, `indicative`, `estimated`) and human-readable routing reasons; labels are never merged or hidden ([#686](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/686)).
-- `web/components/send/LockedPriceCountdown.tsx`: live countdown timer for locked quotes, ensuring expired quotes cannot be sent ([#687](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/687)).
-- `web/components/send/RecipientDetailsForm.tsx`: dynamic recipient form driven by each destination anchor's `/sep31/info` and SEP-12 requirements without hardcoding, updating fields dynamically when switching routes ([#688](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/688)).
-- `web/app/send/page.tsx` & `web/components/send/SendApp.tsx`: `/send` route with permanent testnet banner ("Testnet only — no real money").
-- Tests covering amount validation, route labels, quote countdown, and dynamic recipient fields (`tests/web-send-*.test.ts`).
+- `/send` now runs the send flow inside the existing scaffold and testnet banner. The form checks
+  the amount as a decimal string (positive, at most 7 decimals, within Stellar's limit and the
+  anchor's min and max when known) and offers only destinations read from the testnet corridor
+  manifests ([#685](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/685)).
+- Route options use the router's `RouteOption` and show every option with its own label and
+  RFC 0004 §2 wording ("Recipient gets X. Locked for N s.", "About X. Final amount set at payout.",
+  "About X (estimated)" or "At least X (estimated)"), as a keyboard-usable radio group. Router
+  reasons are reworded in plain language ([#686](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/686)).
+- A locked price counts down to its expiry; once it expires the expired-price screen replaces it
+  and Send is disabled, and Send re-checks the clock at the moment it is pressed ([#687](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/687)).
+- Recipient fields are built from the receiving anchor's `GET /sep31/info`
+  (`fields.transaction`) and SEP-12 `GET /customer` responses, with no field list in the app, and
+  reload when the route changes. Transaction fields go with the payment as `destinationFields`;
+  SEP-12 fields are kept apart for the anchor's KYC server ([#688](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/688)).
+- Route planning, the field lookup and sending are injected into `<SendApp>` (`PlanRoutes`,
+  `LoadReceiverFields`, `SendPayment` in `web/lib/send.ts`). `@corridor/service` offers none of
+  them yet, so the page says routes can't be listed rather than show made-up ones.
 
 ### Added — configurable failure injection for the reference anchor ([#678](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/678))
 

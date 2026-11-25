@@ -1,523 +1,500 @@
-// Core logic, types, and validation for the testnet reference Send App (RFC 0004 §6).
+// The testnet send app's own logic (RFC 0004 §6): validating the amount,
+// wording each route's price and reasons, timing a locked price, and turning an
+// anchor's published requirements into recipient form fields.
+//
+// Pure and self-contained on purpose, like send-errors.ts: the only imports are
+// types, so client components can use it without pulling server code into the
+// browser, and the repo's root suite unit-tests it.
+//
+// Nothing here invents a route, a rate or a field. Routes come from the router
+// (`RouteOption`, packages/router/src/planner.ts) and fields from the receiving
+// anchor's own GET /sep31/info and SEP-12 GET /customer responses. Where those
+// come from is up to the caller: see the `PlanRoutes` and `LoadReceiverFields`
+// seams below.
 
-export type PriceLabel = "locked" | "indicative" | "estimated";
+import type { PriceLabel, RouteOption, RouteRequest } from "@corridor/router";
+import type { Money } from "@corridor/types";
+import type { DroppedRoute } from "./send-errors";
+
+export type { PriceLabel, RouteOption, RouteRequest };
+
+// --- Amount and destination (#685) ------------------------------------------
+
+/** Stellar holds amounts to 7 decimal places. */
+export const AMOUNT_DECIMALS = 7;
+
+/** The largest amount a Stellar operation can carry: int64 max, in stroops. */
+export const MAX_STELLAR_AMOUNT = "922337203685.4775807";
+
+const AMOUNT_PATTERN = /^\d+(?:\.\d+)?$/;
+
+/** A decimal string as an integer count of 10^-7 units, or null if it is not one. */
+function toStroops(amount: string): bigint | null {
+  if (!AMOUNT_PATTERN.test(amount)) return null;
+  const [whole, frac = ""] = amount.split(".");
+  if (frac.length > AMOUNT_DECIMALS) return null;
+  return BigInt(whole + frac.padEnd(AMOUNT_DECIMALS, "0"));
+}
+
+export type AmountCheck =
+  | { valid: true; /** The trimmed amount, as it should be sent. */ amount: string }
+  | { valid: false; error: string };
 
 /**
- * Exact wording and definitions from RFC 0004 §2.
- * Labels are never merged or hidden; each option clearly identifies its pricing tier.
+ * Checks the amount a sender typed. Works on the string throughout, so no
+ * amount is ever rounded through a float. `limits` are the receiving anchor's
+ * own min and max, as decimal strings, when the caller has them.
  */
-export const PRICE_LABELS: Record<
-  PriceLabel,
-  {
-    label: PriceLabel;
-    title: string;
-    description: string;
-    source: string;
+export function validateSendAmount(
+  input: string,
+  limits: { min?: string; max?: string } = {},
+): AmountCheck {
+  const amount = input.trim();
+  if (amount === "") return { valid: false, error: "Enter an amount to send." };
+  if (amount.startsWith("-")) {
+    return { valid: false, error: "The amount must be more than zero." };
   }
-> = {
-  locked: {
-    label: "locked",
-    title: "Locked Price",
-    description: "A locked price comes from a firm SEP-38 quote. The rate is guaranteed until it expires.",
-    source: "SEP-38 firm quote",
-  },
-  indicative: {
-    label: "indicative",
-    title: "Indicative Price",
-    description: "An indicative price comes from current market rates or SEP-38 /price. The final rate may differ when the payment executes.",
-    source: "SEP-38 /price",
-  },
-  estimated: {
-    label: "estimated",
-    title: "Estimated Price",
-    description: "An estimated price is calculated from historical rate data. It is a benchmark estimate, not a live quote.",
-    source: "Historical rate data",
-  },
-} as const;
+  if (!AMOUNT_PATTERN.test(amount)) {
+    return {
+      valid: false,
+      error: "Use digits only, with a dot for decimals, for example 25.50.",
+    };
+  }
+  const decimals = amount.split(".")[1]?.length ?? 0;
+  if (decimals > AMOUNT_DECIMALS) {
+    return {
+      valid: false,
+      error: `Use at most ${AMOUNT_DECIMALS} digits after the decimal point.`,
+    };
+  }
+  const stroops = toStroops(amount);
+  if (stroops === null || stroops <= 0n) {
+    return { valid: false, error: "The amount must be more than zero." };
+  }
+  if (stroops > (toStroops(MAX_STELLAR_AMOUNT) as bigint)) {
+    return { valid: false, error: "That amount is too large to send on Stellar." };
+  }
+  const min = limits.min !== undefined ? toStroops(limits.min) : null;
+  if (min !== null && stroops < min) {
+    return { valid: false, error: `The smallest amount you can send is ${limits.min}.` };
+  }
+  const max = limits.max !== undefined ? toStroops(limits.max) : null;
+  if (max !== null && stroops > max) {
+    return { valid: false, error: `The largest amount you can send is ${limits.max}.` };
+  }
+  return { valid: true, amount };
+}
+
+/** A country and currency a payment can be sent to. */
+export interface Destination {
+  /** ISO 3166-1 alpha-2, for example NG. */
+  country: string;
+  /** ISO 4217, for example NGN. */
+  currency: string;
+}
+
+/** The structural part of a corridor manifest the destination list reads. */
+export interface CorridorLike {
+  source: { asset: string };
+  dest: { asset: string };
+  compliance: { dest_jurisdiction: string };
+  settlement: { network: string };
+}
 
 /**
- * Dynamic receiver field definition driven by an anchor's /sep31/info and SEP-12.
- * No hardcoded field list is assumed: forms are generated directly from field schemas.
+ * The destinations and source assets the send app offers, read from the
+ * corridor manifests rather than typed out by hand. Only testnet lanes count:
+ * this app never moves real money.
+ */
+export function sendOptionsFromCorridors(corridors: readonly CorridorLike[]): {
+  destinations: Destination[];
+  sourceAssets: string[];
+} {
+  const destinations = new Map<string, Destination>();
+  const sourceAssets = new Set<string>();
+  for (const c of corridors) {
+    if (c.settlement.network !== "testnet") continue;
+    const currency = currencyCode(c.dest.asset);
+    const country = c.compliance.dest_jurisdiction.toUpperCase();
+    destinations.set(`${country}:${currency}`, { country, currency });
+    sourceAssets.add(c.source.asset);
+  }
+  return {
+    destinations: [...destinations.values()].sort(
+      (a, b) => a.country.localeCompare(b.country) || a.currency.localeCompare(b.currency),
+    ),
+    sourceAssets: [...sourceAssets].sort(),
+  };
+}
+
+/** What the sender asked for, as the router's `RouteRequest`. */
+export function toRouteRequest(input: {
+  amount: string;
+  sourceAsset: string;
+  destination: Destination;
+}): RouteRequest {
+  return {
+    sourceAmount: { asset: input.sourceAsset, amount: input.amount },
+    destAsset: `iso4217:${input.destination.currency}`,
+    destCountry: input.destination.country,
+  };
+}
+
+// --- Route options and their labels (#686) ----------------------------------
+
+/**
+ * What a route planner gives back: the ranked options, best first, and the
+ * routes it ruled out with the reason for each.
+ */
+export interface PlannedRoutes {
+  options: readonly RouteOption[];
+  dropped?: readonly DroppedRoute[];
+}
+
+/**
+ * The send app's seam to a route planner. @corridor/service does not offer
+ * route planning yet (POST /routes is still being built), so whoever renders
+ * the app injects this. A browser implementation must call the web app's own
+ * /api/send/... routes, never the service directly: the service API key stays
+ * on the server (lib/send-proxy.ts).
+ */
+export type PlanRoutes = (request: RouteRequest) => Promise<PlannedRoutes>;
+
+/** All three labels, in the order RFC 0004 §2 lists them. None is ever folded into another. */
+export const PRICE_LABELS: readonly PriceLabel[] = ["locked", "indicative", "estimated"];
+
+/** What each label means, in plain words. */
+export const PRICE_LABEL_MEANING: Readonly<Record<PriceLabel, string>> = {
+  locked: "A firm quote from the receiving anchor. This amount is held until the timer runs out.",
+  indicative: "The anchor's current price. It is not promised and can change before payout.",
+  estimated: "Worked out from recent rates. The anchor has not quoted this payment.",
+};
+
+/** A payout or source asset as a sender reads it: iso4217:NGN is NGN, USDC:G... is USDC. */
+export function currencyCode(asset: string): string {
+  const withoutScheme = asset.startsWith("iso4217:") ? asset.slice("iso4217:".length) : asset;
+  return withoutScheme.split(":")[0] ?? withoutScheme;
+}
+
+/** Groups the whole part of a decimal string in threes, without going through a float. */
+export function formatAmount(amount: string): string {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(amount.trim());
+  if (!match) return amount;
+  const [, sign = "", whole = "0", frac] = match;
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return frac === undefined ? `${sign}${grouped}` : `${sign}${grouped}.${frac}`;
+}
+
+export function formatMoney(money: Money): string {
+  return `${formatAmount(money.amount)} ${currencyCode(money.asset)}`;
+}
+
+/**
+ * The line that leads each option, in RFC 0004 §2's words for its label.
+ * A locked price shows the seconds it has left, so pass the current time.
+ */
+export function describePrice(
+  option: RouteOption,
+  nowMs: number,
+  opts: { guaranteeEstimates?: boolean } = {},
+): string {
+  const amount = formatMoney(option.recipientGets);
+  switch (option.price.label) {
+    case "locked": {
+      const left = quoteSecondsLeft(option, nowMs) ?? 0;
+      return left > 0
+        ? `Recipient gets ${amount}. Locked for ${left} s.`
+        : `Recipient gets ${amount}. This locked price has expired.`;
+    }
+    case "indicative":
+      return `About ${amount}. Final amount set at payout.`;
+    case "estimated":
+      return opts.guaranteeEstimates
+        ? `At least ${amount} (estimated)`
+        : `About ${amount} (estimated)`;
+  }
+}
+
+/** A stable key for one option, for React lists and for remembering the sender's pick. */
+export function routeKey(option: RouteOption): string {
+  return [
+    option.corridorId,
+    option.receivingDomain,
+    option.protocol,
+    option.price.label,
+    option.price.quoteId ?? "",
+  ].join("|");
+}
+
+/** Router reason strings (packages/router/src/reasons.ts) and how each reads in plain words. */
+const REASON_WORDING: ReadonlyArray<[RegExp, (m: RegExpExecArray) => string]> = [
+  [/^locked for ([\d.]+) s$/, (m) => `The anchor holds this price for ${m[1]} seconds.`],
+  [/^indicative rate from (.+)$/, (m) => `Today's price from ${m[1]}.`],
+  [/^indicative rate$/, () => "Today's price from the receiving anchor."],
+  [
+    /^estimated from ([\d,]+) samples over (\d+) d$/,
+    (m) => `Worked out from ${m[1]} rates seen over the last ${m[2]} days.`,
+  ],
+  [/^dropped: amount above max (.+)$/, (m) => `The amount is above this anchor's limit of ${m[1]}.`],
+  [/^dropped: amount below min (.+)$/, (m) => `The amount is below this anchor's minimum of ${m[1]}.`],
+  [
+    /^dropped: missing required fields: (.+)$/,
+    (m) => `This anchor needs details we can't supply yet: ${m[1]}.`,
+  ],
+  [/^dropped: circuit breaker open.*$/, () => "This anchor failed several recent payments, so it is paused."],
+  [/^dropped: lane not open \((.+)\)$/, () => "This anchor is not taking payments from this sender right now."],
+  [/^dropped: no price within ([\d.]+) s$/, (m) => `This anchor did not answer with a price within ${m[1]} seconds.`],
+  [/^dropped: label (\w+) excluded by policy.*$/, (m) => `Prices labelled ${m[1]} are turned off for this app.`],
+  [/^dropped: insufficient history.*$/, () => "There is not enough rate history yet to estimate a price."],
+];
+
+/**
+ * One router reason in plain words. Formats the router does not document are
+ * shown as they are, with a capital letter and a full stop, rather than hidden.
+ */
+export function plainReason(reason: string): string {
+  const trimmed = reason.trim();
+  for (const [pattern, word] of REASON_WORDING) {
+    const m = pattern.exec(trimmed);
+    if (m) return word(m);
+  }
+  const text = trimmed.replace(/^dropped:\s*/, "");
+  if (text === "") return text;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+// --- Locked price countdown (#687) ------------------------------------------
+
+/** Under this many seconds left, the countdown warns the sender. */
+export const QUOTE_WARNING_SECONDS = 15;
+
+/** Whole seconds left on a locked price, or undefined for a price that is not locked. */
+export function quoteSecondsLeft(option: RouteOption, nowMs: number): number | undefined {
+  if (option.price.label !== "locked") return undefined;
+  const expiresAt = option.price.expiresAt;
+  if (expiresAt === undefined || !Number.isFinite(expiresAt)) return 0;
+  return Math.max(0, Math.floor((expiresAt - nowMs) / 1000));
+}
+
+/**
+ * True once a locked price can no longer be used. A locked option without an
+ * expiry counts as expired: nothing says the anchor still holds it.
+ */
+export function isQuoteExpired(option: RouteOption, nowMs: number): boolean {
+  if (option.price.label !== "locked") return false;
+  const expiresAt = option.price.expiresAt;
+  return expiresAt === undefined || !Number.isFinite(expiresAt) || nowMs >= expiresAt;
+}
+
+/** Seconds as m:ss, for the countdown. */
+export function formatCountdown(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// --- Recipient details from the anchor's requirements (#688) ----------------
+
+/**
+ * One field the receiving anchor asks for. `source` says where the anchor
+ * published it, which is also where the value has to go: SEP-31 transaction
+ * fields travel with the payment (`destinationFields`), SEP-12 fields go to
+ * the anchor's KYC server.
  */
 export interface ReceiverField {
   name: string;
+  /** A readable name made from `name`. */
   label: string;
+  /** The anchor's own description of the field. */
   description?: string;
-  type?: "string" | "number" | "select";
+  optional: boolean;
+  /** Allowed values, when the anchor restricts them. */
   choices?: string[];
-  optional?: boolean;
-  placeholder?: string;
-}
-
-/** One route option returned for a destination and amount. */
-export interface RouteOption {
-  id: string;
-  corridorId: string;
-  anchorName: string;
-  sourceAsset: string;
-  sourceAmount: string;
-  destAsset: string;
-  destCurrency: string;
-  destAmount: string;
-  exchangeRate: string;
-  fee: string;
-  estimatedDelivery: string;
-  label: PriceLabel;
-  reasons: string[];
-  expiresAt?: string;
-  receiverFields: ReceiverField[];
-}
-
-export interface AmountValidationResult {
-  valid: boolean;
-  error?: string;
+  /** SEP-12 field type; SEP-31 transaction fields are strings. */
+  type: "string" | "number" | "date" | "binary";
+  source: "sep31-transaction" | "sep12";
 }
 
 /**
- * Validates the send amount entered in the form.
- * Invalid amounts (negative, zero, NaN, empty, non-numeric, out-of-bounds) are rejected with clear messages.
+ * The send app's seam for the chosen route's fields. An implementation reads
+ * the receiving anchor's GET /sep31/info (and SEP-12 GET /customer for the
+ * receiver type it names) through a server route and turns the responses into
+ * fields with the parsers below. Called again whenever the route changes.
  */
-export function validateSendAmount(
-  amount: string,
-  limits?: { min?: number; max?: number },
-): AmountValidationResult {
-  if (!amount || amount.trim() === "") {
-    return { valid: false, error: "Please enter an amount" };
-  }
+export type LoadReceiverFields = (option: RouteOption) => Promise<ReceiverField[]>;
 
-  const trimmed = amount.trim();
-
-  // Strictly positive decimal numbers with optional leading digits and up to 7 decimal places
-  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
-    return { valid: false, error: "Amount must be a valid positive number" };
-  }
-
-  const num = Number(trimmed);
-  if (!Number.isFinite(num)) {
-    return { valid: false, error: "Amount must be a finite number" };
-  }
-
-  if (num <= 0) {
-    return { valid: false, error: "Amount must be greater than 0" };
-  }
-
-  if (limits?.min !== undefined && num < limits.min) {
-    return { valid: false, error: `Amount is below the minimum limit of ${limits.min}` };
-  }
-
-  if (limits?.max !== undefined && num > limits.max) {
-    return { valid: false, error: `Amount exceeds the maximum limit of ${limits.max}` };
-  }
-
-  return { valid: true };
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Formats remaining seconds into MM:SS. */
-export function formatRemainingSeconds(seconds: number): string {
-  if (seconds <= 0) return "00:00";
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+/** first_name to "First name", receiver_routing_number to "Receiver routing number". */
+export function fieldLabel(name: string): string {
+  const words = name.replace(/[_\-.]+/g, " ").trim();
+  return words === "" ? name : words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-/** Checks whether a quote expiry timestamp has passed. */
-export function isQuoteExpired(expiresAt?: string | number | Date): boolean {
-  if (!expiresAt) return false;
-  const expiry = typeof expiresAt === "number" ? expiresAt : new Date(expiresAt).getTime();
-  if (Number.isNaN(expiry)) return false;
-  return Date.now() >= expiry;
+function stringChoices(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const choices = v.filter((c): c is string => typeof c === "string" && c !== "");
+  return choices.length > 0 ? choices : undefined;
 }
 
-/** Computes remaining seconds until expiration, or 0 if expired. */
-export function getRemainingSeconds(expiresAt?: string | number | Date): number {
-  if (!expiresAt) return 0;
-  const expiry = typeof expiresAt === "number" ? expiresAt : new Date(expiresAt).getTime();
-  if (Number.isNaN(expiry)) return 0;
-  const diffMs = expiry - Date.now();
-  return diffMs > 0 ? Math.floor(diffMs / 1000) : 0;
-}
-
-/**
- * Validates dynamic receiver fields according to their schema.
- * Rejects missing non-optional fields with clear field-specific messages.
- */
-export function validateReceiverFields(
-  fields: ReceiverField[],
-  values: Record<string, string>,
-): { valid: boolean; errors: Record<string, string> } {
-  const errors: Record<string, string> = {};
-
-  for (const field of fields) {
-    if (!field.optional) {
-      const val = values[field.name];
-      if (!val || val.trim() === "") {
-        errors[field.name] = `${field.label} is required`;
-      }
-    }
-  }
-
+function fieldFromSpec(
+  name: string,
+  spec: unknown,
+  source: ReceiverField["source"],
+  type: ReceiverField["type"],
+): ReceiverField {
+  const s = isRecord(spec) ? spec : {};
+  const choices = stringChoices(s.choices);
   return {
-    valid: Object.keys(errors).length === 0,
-    errors,
+    name,
+    label: fieldLabel(name),
+    ...(typeof s.description === "string" && s.description.trim() !== ""
+      ? { description: s.description.trim() }
+      : {}),
+    optional: s.optional === true,
+    ...(choices ? { choices } : {}),
+    type,
+    source,
   };
 }
 
 /**
- * Catalog of supported destination anchor fields driven by their /sep31/info and SEP-12.
- * Each corridor specifies distinct dynamic fields, demonstrating that changing the route
- * dynamically changes the fields without any hardcoding in the form components.
+ * The transaction fields a SEP-31 receiving anchor lists for `asset` in its
+ * GET /sep31/info response, under `receive.<asset>.fields.transaction`.
+ * Anything malformed is skipped rather than guessed at.
  */
-export const ANCHOR_RECEIVER_SCHEMAS: Record<string, ReceiverField[]> = {
-  "reference-testnet": [
-    {
-      name: "routing_number",
-      label: "ACH Routing Number",
-      description: "9-digit US bank routing transit number",
-      type: "string",
-      placeholder: "123456789",
-      optional: false,
-    },
-    {
-      name: "account_number",
-      label: "Bank Account Number",
-      description: "Recipient checking or savings account number",
-      type: "string",
-      placeholder: "9876543210",
-      optional: false,
-    },
-    {
-      name: "account_type",
-      label: "Account Type",
-      description: "Type of destination bank account",
-      type: "select",
-      choices: ["checking", "savings"],
-      optional: false,
-    },
-    {
-      name: "first_name",
-      label: "Recipient First Name",
-      type: "string",
-      placeholder: "Jane",
-      optional: false,
-    },
-    {
-      name: "last_name",
-      label: "Recipient Last Name",
-      type: "string",
-      placeholder: "Doe",
-      optional: false,
-    },
-  ],
-  "ng-cowrie": [
-    {
-      name: "account_number",
-      label: "NUBAN Account Number",
-      description: "10-digit Nigerian bank account number",
-      type: "string",
-      placeholder: "0123456789",
-      optional: false,
-    },
-    {
-      name: "bank_code",
-      label: "Bank Code / CBN Code",
-      description: "3-digit Central Bank of Nigeria bank identifier",
-      type: "select",
-      choices: ["058 (GTBank)", "011 (First Bank)", "057 (Zenith Bank)", "033 (UBA)", "214 (FCMB)"],
-      optional: false,
-    },
-    {
-      name: "account_name",
-      label: "Account Name",
-      description: "Full registered name matching bank account",
-      type: "string",
-      placeholder: "Amina Adeleke",
-      optional: false,
-    },
-    {
-      name: "bvn",
-      label: "BVN (Bank Verification Number)",
-      description: "Optional recipient BVN for expedited clearance",
-      type: "string",
-      placeholder: "22233344455",
-      optional: true,
-    },
-  ],
-  "mx-example": [
-    {
-      name: "clabe",
-      label: "CLABE Interbancaria",
-      description: "18-digit Mexican interbank standard account number",
-      type: "string",
-      placeholder: "012180001234567890",
-      optional: false,
-    },
-    {
-      name: "recipient_name",
-      label: "Beneficiary Full Name",
-      description: "Full legal name as registered with the Mexican bank",
-      type: "string",
-      placeholder: "Carlos Hernandez",
-      optional: false,
-    },
-    {
-      name: "curp",
-      label: "CURP / RFC",
-      description: "Tax identification code",
-      type: "string",
-      placeholder: "HEMC800101XYZ",
-      optional: true,
-    },
-  ],
-  "zeam": [
-    {
-      name: "account_number",
-      label: "South African Account Number",
-      description: "Recipient bank account number",
-      type: "string",
-      placeholder: "4051234567",
-      optional: false,
-    },
-    {
-      name: "branch_code",
-      label: "Branch Code",
-      description: "6-digit universal branch code",
-      type: "string",
-      placeholder: "250655",
-      optional: false,
-    },
-    {
-      name: "account_holder_name",
-      label: "Account Holder Name",
-      type: "string",
-      placeholder: "Sipho Khumalo",
-      optional: false,
-    },
-  ],
-  "testanchor-sep6": [
-    {
-      name: "dest",
-      label: "Payout Destination Address",
-      description: "Off-chain account or identifier for SEP-6 withdrawal",
-      type: "string",
-      placeholder: "user@example.com or phone number",
-      optional: false,
-    },
-    {
-      name: "dest_extra",
-      label: "Memo / Extra Identifier",
-      description: "Optional payout memo or tag",
-      type: "string",
-      optional: true,
-    },
-  ],
-};
-
-/** Default fallback receiver fields for arbitrary anchors */
-export const DEFAULT_RECEIVER_FIELDS: ReceiverField[] = [
-  {
-    name: "recipient_account",
-    label: "Recipient Account",
-    description: "Account or IBAN number",
-    type: "string",
-    optional: false,
-  },
-  {
-    name: "recipient_name",
-    label: "Recipient Name",
-    type: "string",
-    optional: false,
-  },
-];
-
-/**
- * Returns dynamic receiver fields for a specific corridor / anchor.
- * Changing the route returns different fields.
- */
-export function getReceiverFieldsForCorridor(corridorId: string): ReceiverField[] {
-  return ANCHOR_RECEIVER_SCHEMAS[corridorId] || DEFAULT_RECEIVER_FIELDS;
-}
-
-export interface RouteSearchParams {
-  amount: string;
-  sourceAsset: string;
-  destCountry: string;
-  destCurrency: string;
-}
-
-/**
- * Generates ranked route options for given search criteria.
- * Demonstrates locked (firm quote with countdown), indicative (market rate),
- * and estimated (rate history) tiers with exact RFC 0004 §2 wording and human-readable reasons.
- */
-export function findRouteOptions(params: RouteSearchParams): RouteOption[] {
-  const num = Number(params.amount);
-  if (!Number.isFinite(num) || num <= 0) {
+export function receiverFieldsFromSep31Info(info: unknown, asset: string): ReceiverField[] {
+  if (!isRecord(info) || !isRecord(info.receive)) return [];
+  const entry = info.receive[asset];
+  if (!isRecord(entry) || !isRecord(entry.fields) || !isRecord(entry.fields.transaction)) {
     return [];
   }
+  return Object.entries(entry.fields.transaction).map(([name, spec]) =>
+    fieldFromSpec(name, spec, "sep31-transaction", "string"),
+  );
+}
 
-  const { destCountry, destCurrency } = params;
+/** The SEP-12 receiver type the anchor names for `asset`, for example sep31-receiver. */
+export function sep12ReceiverTypes(info: unknown, asset: string): string[] {
+  if (!isRecord(info) || !isRecord(info.receive)) return [];
+  const entry = info.receive[asset];
+  if (!isRecord(entry) || !isRecord(entry.sep12) || !isRecord(entry.sep12.receiver)) return [];
+  const types = entry.sep12.receiver.types;
+  return isRecord(types) ? Object.keys(types) : [];
+}
 
-  // Corridors matching Nigeria
-  if (destCountry === "NG" || destCurrency === "NGN") {
-    const rateLocked = 1520.5;
-    const rateIndicative = 1515.0;
-    const rateEstimated = 1490.0;
+const SEP12_TYPES = new Set(["string", "number", "date", "binary"]);
 
-    return [
-      {
-        id: "route-ng-cowrie-locked",
-        corridorId: "ng-cowrie",
-        anchorName: "Cowrie Nigeria",
-        sourceAsset: params.sourceAsset || "USDC",
-        sourceAmount: params.amount,
-        destAsset: "iso4217:NGN",
-        destCurrency: "NGN",
-        destAmount: (num * rateLocked).toFixed(2),
-        exchangeRate: `1 ${params.sourceAsset || "USDC"} = ${rateLocked.toFixed(2)} NGN`,
-        fee: "0.50 USDC",
-        estimatedDelivery: "~2 minutes",
-        label: "locked",
-        reasons: ["Firm SEP-38 quote", "Guaranteed rate for 60 s", "Fastest NGN delivery"],
-        expiresAt: new Date(Date.now() + 60 * 1000).toISOString(),
-        receiverFields: getReceiverFieldsForCorridor("ng-cowrie"),
-      },
-      {
-        id: "route-ng-indicative",
-        corridorId: "ng-cowrie",
-        anchorName: "Cowrie Market Router",
-        sourceAsset: params.sourceAsset || "USDC",
-        sourceAmount: params.amount,
-        destAsset: "iso4217:NGN",
-        destCurrency: "NGN",
-        destAmount: (num * rateIndicative).toFixed(2),
-        exchangeRate: `1 ${params.sourceAsset || "USDC"} = ${rateIndicative.toFixed(2)} NGN`,
-        fee: "0.75 USDC",
-        estimatedDelivery: "~5 minutes",
-        label: "indicative",
-        reasons: ["Live SEP-38 /price", "Market rate subject to execution window"],
-        receiverFields: getReceiverFieldsForCorridor("ng-cowrie"),
-      },
-      {
-        id: "route-ng-estimated",
-        corridorId: "ng-cn",
-        anchorName: "Alternative Exchange",
-        sourceAsset: params.sourceAsset || "USDC",
-        sourceAmount: params.amount,
-        destAsset: "iso4217:NGN",
-        destCurrency: "NGN",
-        destAmount: (num * rateEstimated).toFixed(2),
-        exchangeRate: `1 ${params.sourceAsset || "USDC"} = ${rateEstimated.toFixed(2)} NGN`,
-        fee: "1.20 USDC",
-        estimatedDelivery: "~15 minutes",
-        label: "estimated",
-        reasons: ["Historical rate estimate (7d median)", "Anchor has no live quote server"],
-        receiverFields: DEFAULT_RECEIVER_FIELDS,
-      },
-    ];
+/**
+ * The fields a SEP-12 GET /customer response still asks for (its `fields`
+ * object). Fields the customer already provided are not in it, per SEP-12.
+ */
+export function receiverFieldsFromSep12(customer: unknown): ReceiverField[] {
+  if (!isRecord(customer) || !isRecord(customer.fields)) return [];
+  return Object.entries(customer.fields).map(([name, spec]) => {
+    const raw = isRecord(spec) && typeof spec.type === "string" ? spec.type : "string";
+    const type = (SEP12_TYPES.has(raw) ? raw : "string") as ReceiverField["type"];
+    return fieldFromSpec(name, spec, "sep12", type);
+  });
+}
+
+/** Joins field lists, keeping the first field of each name. */
+export function mergeReceiverFields(...lists: ReadonlyArray<readonly ReceiverField[]>): ReceiverField[] {
+  const seen = new Map<string, ReceiverField>();
+  for (const list of lists) {
+    for (const field of list) if (!seen.has(field.name)) seen.set(field.name, field);
   }
+  return [...seen.values()];
+}
 
-  // Corridors matching Mexico
-  if (destCountry === "MX" || destCurrency === "MXN") {
-    const rateLocked = 19.85;
-    const rateIndicative = 19.78;
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const NUMBER_PATTERN = /^-?\d+(?:\.\d+)?$/;
 
-    return [
-      {
-        id: "route-mx-locked",
-        corridorId: "mx-example",
-        anchorName: "Bifrost Mexico",
-        sourceAsset: params.sourceAsset || "USDC",
-        sourceAmount: params.amount,
-        destAsset: "iso4217:MXN",
-        destCurrency: "MXN",
-        destAmount: (num * rateLocked).toFixed(2),
-        exchangeRate: `1 ${params.sourceAsset || "USDC"} = ${rateLocked.toFixed(2)} MXN`,
-        fee: "0.25 USDC",
-        estimatedDelivery: "Instant (SPEI)",
-        label: "locked",
-        reasons: ["Firm SEP-38 quote", "SPEI instant payout", "Locked for 45 s"],
-        expiresAt: new Date(Date.now() + 45 * 1000).toISOString(),
-        receiverFields: getReceiverFieldsForCorridor("mx-example"),
-      },
-      {
-        id: "route-mx-indicative",
-        corridorId: "mx-example",
-        anchorName: "SPEI Direct Market",
-        sourceAsset: params.sourceAsset || "USDC",
-        sourceAmount: params.amount,
-        destAsset: "iso4217:MXN",
-        destCurrency: "MXN",
-        destAmount: (num * rateIndicative).toFixed(2),
-        exchangeRate: `1 ${params.sourceAsset || "USDC"} = ${rateIndicative.toFixed(2)} MXN`,
-        fee: "0.50 USDC",
-        estimatedDelivery: "~10 minutes",
-        label: "indicative",
-        reasons: ["SEP-38 /price endpoint", "Rate subject to trade settlement"],
-        receiverFields: getReceiverFieldsForCorridor("mx-example"),
-      },
-    ];
+/**
+ * Checks the sender's entries against the anchor's fields. Errors are keyed by
+ * field name, worded for the person filling the form in.
+ */
+export function validateReceiverFields(
+  fields: readonly ReceiverField[],
+  values: Readonly<Record<string, string>>,
+): { valid: boolean; errors: Record<string, string> } {
+  const errors: Record<string, string> = {};
+  for (const field of fields) {
+    const value = (values[field.name] ?? "").trim();
+    if (field.type === "binary") {
+      if (!field.optional) {
+        errors[field.name] = `${field.label} is a document upload, which this app can't send yet.`;
+      }
+      continue;
+    }
+    if (value === "") {
+      if (!field.optional) errors[field.name] = `Enter the ${field.label.toLowerCase()}.`;
+      continue;
+    }
+    if (field.choices && !field.choices.includes(value)) {
+      errors[field.name] = `Pick one of the listed options for ${field.label.toLowerCase()}.`;
+    } else if (field.type === "number" && !NUMBER_PATTERN.test(value)) {
+      errors[field.name] = `${field.label} must be a number.`;
+    } else if (field.type === "date" && !DATE_PATTERN.test(value)) {
+      errors[field.name] = `${field.label} must be a date.`;
+    }
   }
+  return { valid: Object.keys(errors).length === 0, errors };
+}
 
-  // Corridors matching South Africa
-  if (destCountry === "ZA" || destCurrency === "ZAR") {
-    const rateLocked = 18.25;
-    return [
-      {
-        id: "route-za-locked",
-        corridorId: "zeam",
-        anchorName: "Zeam South Africa",
-        sourceAsset: params.sourceAsset || "USDC",
-        sourceAmount: params.amount,
-        destAsset: "iso4217:ZAR",
-        destCurrency: "ZAR",
-        destAmount: (num * rateLocked).toFixed(2),
-        exchangeRate: `1 ${params.sourceAsset || "USDC"} = ${rateLocked.toFixed(2)} ZAR`,
-        fee: "0.40 USDC",
-        estimatedDelivery: "~30 minutes (RTC)",
-        label: "locked",
-        reasons: ["Firm SEP-38 quote", "Real-Time Clearing (RTC)"],
-        expiresAt: new Date(Date.now() + 60 * 1000).toISOString(),
-        receiverFields: getReceiverFieldsForCorridor("zeam"),
-      },
-    ];
+/**
+ * The entries split by where they go: SEP-31 transaction fields become the
+ * payment's `destinationFields`; SEP-12 fields go to the anchor's KYC server.
+ * Empty optional entries are left out.
+ */
+export function splitReceiverValues(
+  fields: readonly ReceiverField[],
+  values: Readonly<Record<string, string>>,
+): { destinationFields: Record<string, string>; customerFields: Record<string, string> } {
+  const destinationFields: Record<string, string> = {};
+  const customerFields: Record<string, string> = {};
+  for (const field of fields) {
+    const value = (values[field.name] ?? "").trim();
+    if (value === "" || field.type === "binary") continue;
+    if (field.source === "sep31-transaction") destinationFields[field.name] = value;
+    else customerFields[field.name] = value;
   }
+  return { destinationFields, customerFields };
+}
 
-  // Default / US Payout (Reference Anchor)
-  const rateLocked = 1.0;
-  const rateIndicative = 0.998;
-  return [
-    {
-      id: "route-us-reference-locked",
-      corridorId: "reference-testnet",
-      anchorName: "Anchor Platform Reference",
-      sourceAsset: params.sourceAsset || "USDC",
-      sourceAmount: params.amount,
-      destAsset: "iso4217:USD",
-      destCurrency: "USD",
-      destAmount: (num * rateLocked - 0.5).toFixed(2),
-      exchangeRate: `1 ${params.sourceAsset || "USDC"} = 1.00 USD`,
-      fee: "0.50 USDC",
-      estimatedDelivery: "Instant (Local Testnet)",
-      label: "locked",
-      reasons: ["Firm SEP-38 quote", "Lowest fee", "Full SEP-31 testnet compliance"],
-      expiresAt: new Date(Date.now() + 60 * 1000).toISOString(),
-      receiverFields: getReceiverFieldsForCorridor("reference-testnet"),
-    },
-    {
-      id: "route-us-sep6-indicative",
-      corridorId: "testanchor-sep6",
-      anchorName: "TestAnchor SEP-6",
-      sourceAsset: params.sourceAsset || "USDC",
-      sourceAmount: params.amount,
-      destAsset: "iso4217:USD",
-      destCurrency: "USD",
-      destAmount: (num * rateIndicative - 1.0).toFixed(2),
-      exchangeRate: `1 ${params.sourceAsset || "USDC"} = 0.998 USD`,
-      fee: "1.00 USDC",
-      estimatedDelivery: "~5 minutes",
-      label: "indicative",
-      reasons: ["SEP-6 /withdraw price", "Alternative protocol lane"],
-      receiverFields: getReceiverFieldsForCorridor("testanchor-sep6"),
-    },
-  ];
+// --- Sending ----------------------------------------------------------------
+
+/** Everything the sender chose, ready for whoever sends it. */
+export interface SendSelection {
+  request: RouteRequest;
+  option: RouteOption;
+  destinationFields: Record<string, string>;
+  customerFields: Record<string, string>;
+}
+
+/**
+ * The seam for the send step itself. As with the planner, a browser
+ * implementation goes through /api/send/payments, never to the service.
+ */
+export type SendPayment = (selection: SendSelection) => Promise<void>;
+
+export type SendBlock = "no_route" | "quote_expired" | "fields_invalid" | null;
+
+/**
+ * Why Send cannot go ahead right now, or null when it can. Checked when the
+ * button renders and again at the moment it is pressed, so a price that runs
+ * out between the two is still refused.
+ */
+export function sendBlockedBy(input: {
+  option: RouteOption | null;
+  nowMs: number;
+  fields: readonly ReceiverField[];
+  values: Readonly<Record<string, string>>;
+}): SendBlock {
+  if (!input.option) return "no_route";
+  if (isQuoteExpired(input.option, input.nowMs)) return "quote_expired";
+  if (!validateReceiverFields(input.fields, input.values).valid) return "fields_invalid";
+  return null;
 }
