@@ -47,6 +47,28 @@ export {
   BREAKERS_MIGRATION_SQL,
 } from "./breaker-pg";
 export {
+  CREATE_RATE_SAMPLES_TABLE_SQL,
+  RATE_SAMPLES_INDEX_SQL,
+  CREATE_RATE_DAILY_SUMMARIES_TABLE_SQL,
+  RATE_DAILY_SUMMARIES_INDEX_SQL,
+  RATE_HISTORY_MIGRATION_SQL,
+  RATE_SAMPLE_SOURCES,
+  ANCHOR_RATE_SOURCES,
+  RATE_NETWORKS,
+  PostgresRateHistoryStore,
+  assertRateSample,
+  assertRateDailySummary,
+  type RateSeries,
+  type RateNetwork,
+  type RateSampleInput,
+  type RateSampleRecord,
+  type RateSampleSource,
+  type ListRateSamplesFilter,
+  type RateDailySummary,
+  type RateDailySummaryRecord,
+  type ListRateDailySummariesFilter,
+} from "./rate-samples-pg";
+export {
   UnimplementedSubmitter,
   createMockSubmitter,
   StellarPaymentStrategy,

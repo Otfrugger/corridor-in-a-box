@@ -26,6 +26,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 - Route planning, the field lookup and sending are injected into `<SendApp>` (`PlanRoutes`,
   `LoadReceiverFields`, `SendPayment` in `web/lib/send.ts`). `@corridor/service` offers none of
   them yet, so the page says routes can't be listed rather than show made-up ones.
+### Added — Rate history schema and migrations ([#589](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/589))
+
+- A `rate_samples` Postgres table for RFC 0004 §3: network (`testnet` or `public`), sell and
+  buy asset (SEP-38 strings), source (`sep38_price`, `dex_trade`, `reference_fx`,
+  `own_payment`), anchor domain, rate, sampled-at time, payment run, outlier flag and a JSON
+  detail. Check constraints tie the anchor domain and the run to the sources that have them.
+- A unique key per series and instant makes a collector's re-read a no-op, and its order serves
+  the planner's window query; a second key allows one `own_payment` sample per run.
+- A `rate_daily_summaries` table (sample and outlier count, min, P25, median, P75, max per
+  series and UTC day) for publishing and for pruning old samples safely.
+- Rates are stored as `numeric` and handled as decimal strings, never floats. The shared
+  `migrate()` creates both tables idempotently; it now needs Postgres 15 or later.
+- `PostgresRateHistoryStore` (`record()`, `list()`, `upsertDailySummary()`,
+  `listDailySummaries()`) is exported from `@corridor/engine`.
+
+### Added — Latin America anchor fleet ([#665](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/665))
+
+- `ntokens.com` (nTokens, Brazil), `pubnet-sep.latamex.com` (Latamex, Argentina and Brazil)
+  and `etherfuse.com` (Etherfuse, Mexico) in `contracts/anchors.json`, each with a stellar.toml
+  fetched and probed with `pnpm probe:anchor` on 2026-11-25 and a source. Amero Exchange and
+  Ripio were left out: neither serves a stellar.toml.
+
+### Added — Dashboard filters for SEP, asset and country ([#668](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/668))
+
+- The attested-anchor list on each network can be filtered by SEP (advertised, or SEP-31
+  probed and working), probed receive asset, declared country and domain. The filters live in
+  the URL beside `?network=`, so a filtered view can be linked to.
 
 ### Added — configurable failure injection for the reference anchor ([#678](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/678))
 

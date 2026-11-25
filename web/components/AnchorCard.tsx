@@ -60,6 +60,23 @@ export function AnchorCard({
         </div>
       </div>
 
+      {(anchor.countries?.length ?? 0) > 0 || (anchor.receiveAssets?.length ?? 0) > 0 ? (
+        <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-secondary-text">
+          {anchor.receiveAssets && anchor.receiveAssets.length > 0 && (
+            <div className="flex items-center gap-1">
+              <dt className="font-medium text-primary-text">Receives (probed)</dt>
+              <dd className="font-mono">{anchor.receiveAssets.join(", ")}</dd>
+            </div>
+          )}
+          {anchor.countries && anchor.countries.length > 0 && (
+            <div className="flex items-center gap-1">
+              <dt className="font-medium text-primary-text">Countries (declared)</dt>
+              <dd className="font-mono">{anchor.countries.join(", ")}</dd>
+            </div>
+          )}
+        </dl>
+      ) : null}
+
       {/* Per-probe results. A probe that was never run is rendered differently
           from one that ran and failed — "we didn't check" and "it doesn't work"
           are different claims and the page should not blur them. */}

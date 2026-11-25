@@ -65,6 +65,17 @@ function answer(method: string, domain: string): xdr.ScVal {
       return xdr.ScVal.scvBool(true);
     case "staleness":
       return u32(12);
+    case "get_meta":
+      // Only the mainnet anchor has metadata. The testnet one has none, and a read of it
+      // fails the way the contract's NotFound does: the anchor must still be listed.
+      if (domain !== "mainnet-only.example") throw new Error(`no metadata for ${domain}`);
+      return struct({
+        domain: nativeToScVal(domain, { type: "string" }),
+        receive_assets: xdr.ScVal.scvVec([nativeToScVal("USDC", { type: "string" })]),
+        country: nativeToScVal("MX", { type: "string" }),
+        attested_ledger: u32(78),
+        attester: new Address(ATTESTER).toScVal(),
+      });
     default:
       throw new Error(`the fake registry has no method ${method}`);
   }
@@ -204,6 +215,9 @@ describe("web registry source, once both networks have a registry", () => {
 
     expect(snapshot).toMatchObject({ ok: true, deployed: true, latestLedger: 100 });
     expect(snapshot.anchors.map((a) => a.domain)).toEqual(["testnet-only.example"]);
+    // No metadata was attested for it, so it carries no receive assets or countries.
+    expect(snapshot.anchors[0]).not.toHaveProperty("receiveAssets");
+    expect(snapshot.anchors[0]).not.toHaveProperty("countries");
     expect(sources(calls)).toEqual({
       rpcs: [fake.testnet.rpcUrl],
       contracts: [fake.testnet.registry],
@@ -226,17 +240,20 @@ describe("web registry source, once both networks have a registry", () => {
         attester: ATTESTER,
         staleness: 12,
         servesSep31: true,
+        receiveAssets: ["USDC"],
+        countries: ["MX"],
       },
     ]);
     expect(sources(calls)).toEqual({
       rpcs: [fake.public.rpcUrl],
       contracts: [fake.public.registry],
     });
-    // One ledger read, the domain list, then three reads for the one anchor.
+    // One ledger read, the domain list, then four reads for the one anchor.
     expect(calls.map((c) => c.method).sort()).toEqual([
       "domains",
       "getLatestLedger",
       "get_anchor",
+      "get_meta",
       "serves_sep31",
       "staleness",
     ]);

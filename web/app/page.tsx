@@ -3,7 +3,7 @@ import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity, Info, Link2 } from "l
 import { Button } from "@/components/ui/Button";
 import { CorridorCard } from "@/components/CorridorCard";
 import { LivenessLegend } from "@/components/LivenessLegend";
-import { AnchorCard } from "@/components/AnchorCard";
+import { AttestedAnchorsSection } from "@/components/AttestedAnchorsSection";
 import { NetworkSwitch } from "@/components/NetworkSwitch";
 import { NoRegistry } from "@/components/NoRegistry";
 import { RegistryFreshness } from "@/components/RegistryFreshness";
@@ -184,11 +184,7 @@ function AnchorPanel({ network, snapshot }: { network: NetworkId; snapshot: Snap
           No anchors have been attested on {label} yet.
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {snapshot.anchors.map((a) => (
-            <AnchorCard key={a.domain} anchor={a} network={network} />
-          ))}
-        </div>
+        <AttestedAnchorsSection anchors={snapshot.anchors} network={network} />
       )}
     </div>
   );

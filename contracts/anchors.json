@@ -144,6 +144,36 @@
     "is written. Its site states no address and links its code at github.com/StellarCN;",
     "`countries` is left empty rather than inferred.",
     "",
+    "ntokens.com, pubnet-sep.latamex.com and etherfuse.com were added for the Latin America",
+    "fleet (#665). Each stellar.toml is on the public network, and each issuer account names",
+    "that domain as its home domain. Probed 2026-11-25 with `pnpm probe:anchor <domain>`.",
+    "Amero Exchange (https://anchors.stellar.org/?search=Amero; www.amero.exchange) and Ripio",
+    "(https://anchors.stellar.org/?search=Ripio; www.ripio.com) are in the directory with",
+    "toml_file null and were left out. On 2026-11-25 amero.exchange answered HTTP 530 and",
+    "www.amero.exchange did not resolve; ripio.com and www.ripio.com answered HTTP 403 for",
+    "/.well-known/stellar.toml.",
+    "",
+    "ntokens.com is nTokens (toml ORG_NAME nTokens Servicos Digitais Ltda, Sao Paulo, Brazil).",
+    "It is not in anchors.stellar.org, so the source is the stellar.toml on its own site. The",
+    "toml issues BRL and advertises SEP-6, SEP-10, SEP-12, SEP-24 and SEP-31 (servers at",
+    "https://ntokens-box.bpventures.us). Probe: toml_fetch, sep10_auth, sep31_info (receives",
+    "BRL), sep6_info (withdraws BRL) and sep6_auth (HTTP 403) pass; sep12_status fails with",
+    "HTTP 500. An earlier run the same day failed sep31_info with `fetch failed`, so the",
+    "SEP-31 server answers but not every time. No corridor manifest is written yet.",
+    "",
+    "pubnet-sep.latamex.com is Latamex (https://anchors.stellar.org/?search=Latamex; the",
+    "directory lists Argentina and Brazil and SEP-6, with website www.latamex.com, which",
+    "serves no stellar.toml). The domain is the home domain of the ARST issuer",
+    "GCSAZVWXZKWS4XS223M5F54H2B6XPIIXZZGP7KEAIU6YSL5HDRGCI3DG. Its toml (ORG_NAME Relay Tech",
+    "Services Ltd) issues ARST, BRLT and USDC and advertises SEP-6, SEP-10 and SEP-24, no",
+    "SEP-31. Probe: toml_fetch, sep10_auth, sep6_info (withdraws ARST, BRLT, USDC) and",
+    "sep6_auth (HTTP 200) pass.",
+    "",
+    "etherfuse.com is Etherfuse (https://anchors.stellar.org/?search=Etherfuse; the directory",
+    "lists Mexico). Its toml issues tokenized government bonds (CETES, USTRY, TESOURO and",
+    "others) and advertises only WEB_AUTH_ENDPOINT (SEP-10), no transfer or SEP-31 server.",
+    "Probe: toml_fetch and sep10_auth pass.",
+    "",
     "Each entry in `anchors` records curator-declared context (name, ISO 3166-1",
     "alpha-2 countries, kind, directory/manifest source, and date added). Countries",
     "and `kind` are curator-declared metadata, NOT attested facts; `domains` mirrors",
@@ -173,7 +203,10 @@
     "cebuanalhuillier.com",
     "perahub.com.ph",
     "ripplefox.com",
-    "fchain.io"
+    "fchain.io",
+    "ntokens.com",
+    "pubnet-sep.latamex.com",
+    "etherfuse.com"
   ],
   "anchors": [
     {
@@ -367,6 +400,30 @@
       "kind": "other",
       "source": "https://fchain.io/.well-known/stellar.toml",
       "added": "2026-11-20"
+    },
+    {
+      "domain": "ntokens.com",
+      "name": "nTokens",
+      "countries": ["BR"],
+      "kind": "other",
+      "source": "https://ntokens.com/.well-known/stellar.toml",
+      "added": "2026-11-24"
+    },
+    {
+      "domain": "pubnet-sep.latamex.com",
+      "name": "Latamex",
+      "countries": ["AR", "BR"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=Latamex",
+      "added": "2026-11-24"
+    },
+    {
+      "domain": "etherfuse.com",
+      "name": "Etherfuse",
+      "countries": ["MX"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=Etherfuse",
+      "added": "2026-11-24"
     }
   ]
 }

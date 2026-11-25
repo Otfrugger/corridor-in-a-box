@@ -29,6 +29,9 @@ describe("contracts/anchors.json fleet", () => {
       "perahub.com.ph",
       "ripplefox.com",
       "fchain.io",
+      "ntokens.com",
+      "pubnet-sep.latamex.com",
+      "etherfuse.com",
     ]);
     expect(fleet.anchors.map((a) => ({ domain: a.domain, kind: a.kind }))).toEqual([
       { domain: "testanchor.stellar.org", kind: "test" },
@@ -55,6 +58,9 @@ describe("contracts/anchors.json fleet", () => {
       { domain: "perahub.com.ph", kind: "other" },
       { domain: "ripplefox.com", kind: "other" },
       { domain: "fchain.io", kind: "other" },
+      { domain: "ntokens.com", kind: "other" },
+      { domain: "pubnet-sep.latamex.com", kind: "other" },
+      { domain: "etherfuse.com", kind: "other" },
     ]);
   });
 

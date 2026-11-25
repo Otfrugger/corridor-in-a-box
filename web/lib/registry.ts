@@ -15,6 +15,7 @@
 
 import { Contract, rpc, scValToNative, TransactionBuilder, Account, nativeToScVal } from "@stellar/stellar-sdk";
 import deployments from "../../contracts/deployments.json";
+import fleet from "../../contracts/anchors.json";
 import { parseNetwork, type NetworkId } from "./network";
 
 /** SEP numbers in the registry's bit order. Mirrors SEP_NUMBERS in the contract. */
@@ -45,6 +46,17 @@ export interface AnchorAttestation {
   staleness: number;
   /** Advertises SEP-31 AND passed the SEP-31 probe. Not the same as advertising it. */
   servesSep31: boolean;
+  /**
+   * OBSERVED: asset codes the anchor's SEP-31 `/info` listed as receivable, from the
+   * registry's `get_meta`. Absent when no metadata was attested for the domain.
+   */
+  receiveAssets?: string[];
+  /**
+   * DECLARED, never attested: the country in the anchor's own stellar.toml (`get_meta`)
+   * plus the curator's `countries` for it in contracts/anchors.json. Absent when neither
+   * names one.
+   */
+  countries?: string[];
 }
 
 const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -114,6 +126,32 @@ async function read<T>(
 
 const str = (s: string) => nativeToScVal(s, { type: "string" });
 
+interface RawMeta {
+  receive_assets: string[];
+  country?: string | null;
+}
+
+/** Curator-declared countries per domain, from contracts/anchors.json. */
+const DECLARED_COUNTRIES = new Map(
+  (fleet.anchors as Array<{ domain: string; countries?: string[] }>).map((a) => [
+    a.domain,
+    a.countries ?? [],
+  ]),
+);
+
+/**
+ * The registry's metadata for a domain, or undefined when it has none. `get_meta` fails for a
+ * domain no attester has written metadata for; that is "nothing observed", not a read error,
+ * so it must not hide the anchor's attestation.
+ */
+async function readMeta(network: string, domain: string): Promise<RawMeta | undefined> {
+  try {
+    return await read<RawMeta>(network, "get_meta", [str(domain)]);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Every attestation in the registry.
  *
@@ -162,10 +200,17 @@ export async function fetchAttestations(network: string = REGISTRY_NETWORK): Pro
     const anchors = await Promise.all(
       domains.map(async (domain) => {
         const raw = await read<RawRecord>(network, "get_anchor", [str(domain)]);
-        const [servesSep31, staleness] = await Promise.all([
+        const [servesSep31, staleness, meta] = await Promise.all([
           read<boolean>(network, "serves_sep31", [str(domain)]),
           read<number>(network, "staleness", [str(domain)]),
+          readMeta(network, domain),
         ]);
+        const countries = [
+          ...new Set([
+            ...(meta?.country ? [meta.country] : []),
+            ...(DECLARED_COUNTRIES.get(raw.domain) ?? []),
+          ]),
+        ];
         return {
           domain: raw.domain,
           seps: decode(raw.seps, SEP_NUMBERS) as number[],
@@ -176,6 +221,8 @@ export async function fetchAttestations(network: string = REGISTRY_NETWORK): Pro
           attester: raw.attester,
           staleness,
           servesSep31,
+          ...(meta && meta.receive_assets.length > 0 ? { receiveAssets: meta.receive_assets } : {}),
+          ...(countries.length > 0 ? { countries } : {}),
         } satisfies AnchorAttestation;
       }),
     );

@@ -785,6 +785,33 @@ Don't run the service as the table owner: an owner can always update or
 delete its own rows. `tests/integration/audit-pg.test.ts` checks that a role
 granted only `SELECT`/`INSERT` is refused both.
 
+### Rate history
+
+`migrate()` also creates the rate history RFC 0004 §3 needs for `estimated`
+prices (`packages/engine/src/rate-samples-pg.ts`). It needs Postgres 15 or
+later: the unique keys use `nulls not distinct`.
+
+- `rate_samples`: one row per observed price. A series is one network
+  (`testnet` or `public`), sell and buy asset (SEP-38 strings such as
+  `stellar:USDC:G…` or `iso4217:BRL`), source (`sep38_price`, `dex_trade`,
+  `reference_fx` or `own_payment`) and anchor domain (set for `sep38_price` and
+  `own_payment` only). Rates are `numeric`, never floats, and must be positive.
+  A series holds one sample per instant, and a payment run one `own_payment`
+  sample, so a collector that re-reads an overlapping window stores nothing
+  twice. Samples flagged `outlier` are kept and visible, and left out of
+  estimates and summaries.
+- `rate_daily_summaries`: per series and UTC day, the sample count, outlier
+  count and min, P25, median, P75 and max. Kept forever; raw samples are pruned
+  only once their day has a summary row.
+
+`PostgresRateHistoryStore` writes and reads both. A collector needs `insert`
+(and `update` for the outlier flag and summaries); the planner only `select`:
+
+```sql
+grant select, insert, update on rate_samples, rate_daily_summaries to corridor_service;
+grant usage on sequence rate_samples_id_seq to corridor_service;
+```
+
 To read a payment's trail, use `PostgresAuditSink.listAudit(idempotencyKey)`.
 It returns the entries oldest first.
 
