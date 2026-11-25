@@ -26,6 +26,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 - Route planning, the field lookup and sending are injected into `<SendApp>` (`PlanRoutes`,
   `LoadReceiverFields`, `SendPayment` in `web/lib/send.ts`). `@corridor/service` offers none of
   them yet, so the page says routes can't be listed rather than show made-up ones.
+
 ### Added — Rate history schema and migrations ([#589](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/589))
 
 - A `rate_samples` Postgres table for RFC 0004 §3: network (`testnet` or `public`), sell and
