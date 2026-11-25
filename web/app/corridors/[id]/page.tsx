@@ -4,6 +4,7 @@ import type { Metadata } from "next";
 import { AlertTriangle, ArrowLeft, ArrowRight, Link2 } from "lucide-react";
 import { AnchorCard } from "@/components/AnchorCard";
 import { LivenessBadge } from "@/components/LivenessBadge";
+import { NoRegistry } from "@/components/NoRegistry";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import {
@@ -14,6 +15,7 @@ import {
   endpoint,
   type EndpointKey,
 } from "@/lib/corridors";
+import { NETWORK_LABEL } from "@/lib/network";
 import { fetchAttestations, REGISTRY_ID, REGISTRY_NETWORK } from "@/lib/registry";
 
 // Anchor facts come from the chain, and attestations change on the order of
@@ -229,11 +231,14 @@ export default async function CorridorPage({ params }: { params: Promise<{ id: s
         </div>
         <p className="text-sm text-secondary-text">
           Attestation for the destination anchor&apos;s home domain,{" "}
-          <span className="font-mono">{domain}</span>. This is the only section sourced from
-          the chain; everything above is what the manifest claims.
+          <span className="font-mono">{domain}</span>, read from the{" "}
+          {NETWORK_LABEL[REGISTRY_NETWORK]} registry. This is the only section sourced from the
+          chain; everything above is what the manifest claims.
         </p>
 
-        {!attestations.ok ? (
+        {!attestations.deployed ? (
+          <NoRegistry network={REGISTRY_NETWORK} />
+        ) : !attestations.ok ? (
           <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
             <div className="mb-1 font-medium text-primary-text">Registry unreachable</div>
             Could not read the registry ({attestations.error}). This is not the same as
@@ -242,7 +247,7 @@ export default async function CorridorPage({ params }: { params: Promise<{ id: s
           </div>
         ) : attestation ? (
           <div className="grid gap-4 md:grid-cols-2">
-            <AnchorCard anchor={attestation} />
+            <AnchorCard anchor={attestation} network={REGISTRY_NETWORK} />
           </div>
         ) : (
           <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">

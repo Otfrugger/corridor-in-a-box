@@ -8,6 +8,8 @@ import {
 import {
   StaticRouteResolver,
   UnattestedAnchorError,
+  type OptionRanking,
+  type RankedOption,
   type RouteResolver,
 } from "@corridor/router";
 import { amountRangeCheck } from "@corridor/sep31";
@@ -17,6 +19,9 @@ import {
   InMemoryCorridorHealthStore,
   InMemoryIdempotencyStore,
   InMemoryMetrics,
+  PostgresAuditSink,
+  routeChoiceFor,
+  type Queryable,
   hasRequestedRefund,
   canTransition,
   createMockSubmitter,
@@ -3294,5 +3299,274 @@ describe("adapter-reported (off-chain) settlement (#186)", () => {
     // No submitter calls were made
     expect(submitCalled).toBe(false);
     expect(refundCalled).toBe(false);
+  });
+});
+
+// #628: why did this payment go through anchor X? The answer is in the trail.
+describe("routing choice in the audit trail", () => {
+  /** A Queryable that keeps corridor_audit rows in memory, so a test can read back what was written. */
+  function rowStore(): Queryable {
+    const rows: Record<string, unknown>[] = [];
+    return {
+      async query<R>(text: string, params: unknown[] = []) {
+        if (/insert into corridor_audit/.test(text)) {
+          const [key, corridorId, from, to, version, at, error, requestId, detail] = params;
+          const dup = rows.some(
+            (r) => r.idempotency_key === key && r.version === version && r.to_state === to,
+          );
+          if (!dup) {
+            rows.push({
+              idempotency_key: key,
+              corridor_id: corridorId,
+              from_state: from,
+              to_state: to,
+              version,
+              at: new Date(at as number),
+              error,
+              request_id: requestId,
+              detail,
+            });
+          }
+          return { rows: [] as R[] };
+        }
+        return { rows: rows.filter((r) => r.idempotency_key === params[0]) as R[] };
+      },
+    };
+  }
+
+  const rankedOptions: RankedOption[] = [
+    { id: "anchor-z", label: "estimated", rank: 3, reasons: ["p95 settle 210s"] },
+    { id: "anchor-w", rank: 4, reasons: ["no price and too little rate history"] },
+    {
+      id: "anchor-x",
+      label: "locked",
+      rank: 1,
+      reasons: ["attested 2h ago", "lowest total fee 0.45%"],
+    },
+    {
+      id: "anchor-y",
+      label: "indicative",
+      rank: 2,
+      reasons: ["fee 0.60%", "p95 settle 95s"],
+    },
+  ];
+
+  function resolverWith(ranking: OptionRanking): RouteResolver {
+    return {
+      async resolve() {
+        return {
+          receiving: createMockAdapter({ name: "anchor-x" }),
+          trust: "manifest" as const,
+          ranking,
+        };
+      },
+    };
+  }
+
+  const ranked = resolverWith({ chosen: "anchor-x", options: rankedOptions });
+
+  it("records the chosen option, its price label and rank, and the top three reasons; reads it back from Postgres", async () => {
+    const sink = new PostgresAuditSink(rowStore());
+    const r = await execute(intent("route-audit-1"), corridor(), {
+      ...deps(),
+      resolver: ranked,
+      audit: sink,
+    });
+    expect(r.ok).toBe(true);
+
+    const trail = await sink.listAudit("route-audit-1");
+    const withRoute = trail.filter((e) => e.route);
+    expect(withRoute).toHaveLength(1);
+    const entry = withRoute[0]!;
+    expect(entry.from).toBe("created");
+    expect(entry.route).toEqual({
+      chosen: { id: "anchor-x", label: "locked", rank: 1 },
+      top: [
+        {
+          id: "anchor-x",
+          label: "locked",
+          rank: 1,
+          reasons: ["attested 2h ago", "lowest total fee 0.45%"],
+        },
+        {
+          id: "anchor-y",
+          label: "indicative",
+          rank: 2,
+          reasons: ["fee 0.60%", "p95 settle 95s"],
+        },
+        { id: "anchor-z", label: "estimated", rank: 3, reasons: ["p95 settle 210s"] },
+      ],
+    });
+    // The fourth option is not recorded.
+    expect(JSON.stringify(trail)).not.toContain("anchor-w");
+  });
+
+  it("records the resolver's price label for the chosen option, even when the run's quote is labelled differently", async () => {
+    const audit = new InMemoryAuditLog();
+    const store = new InMemoryIdempotencyStore();
+    const r = await execute(intent("route-audit-label"), corridor(), {
+      ...deps(),
+      idempotency: store,
+      resolver: resolverWith({
+        chosen: "anchor-x",
+        options: [{ id: "anchor-x", label: "estimated", rank: 1, reasons: ["P25 of 7d"] }],
+      }),
+      audit,
+    });
+    expect(r.ok).toBe(true);
+    expect((await store.get("route-audit-label"))?.priceLabel).toBe("locked");
+    const route = audit.entries.find((e) => e.route)?.route;
+    expect(route?.chosen).toEqual({ id: "anchor-x", label: "estimated", rank: 1 });
+    expect(route?.top[0]?.label).toBe("estimated");
+  });
+
+  it("labels the chosen option with the run's own quote label when the resolver gives none", async () => {
+    const audit = new InMemoryAuditLog();
+    const store = new InMemoryIdempotencyStore();
+    const r = await execute(intent("route-audit-nolabel"), corridor(), {
+      ...deps(),
+      idempotency: store,
+      resolver: resolverWith({
+        chosen: "anchor-x",
+        options: [
+          { id: "anchor-x", rank: 1, reasons: ["only attested anchor"] },
+          { id: "anchor-y", rank: 2, reasons: ["unpriceable"] },
+        ],
+      }),
+      audit,
+    });
+    expect(r.ok).toBe(true);
+    const runLabel = (await store.get("route-audit-nolabel"))?.priceLabel;
+    expect(runLabel).toBe("locked");
+    const route = audit.entries.find((e) => e.route)?.route;
+    expect(route?.chosen).toEqual({ id: "anchor-x", label: runLabel, rank: 1 });
+    // Only the chosen option borrows the run's label; the others stay unlabelled.
+    expect(route?.top[0]).not.toHaveProperty("label");
+    expect(route?.top[1]).not.toHaveProperty("label");
+  });
+
+  it("records the receiving adapter as the only option when the resolver gives no ranking", async () => {
+    const audit = new InMemoryAuditLog();
+    const r = await execute(intent("route-audit-2"), corridor(), { ...deps(), audit });
+    expect(r.ok).toBe(true);
+    const withRoute = audit.entries.filter((e) => e.route);
+    expect(withRoute).toHaveLength(1);
+    // No ranking: the run's own quote supplies the label (the mock quote is firm, so locked).
+    expect(withRoute[0]!.route).toEqual({
+      chosen: { id: "mock-anchor", label: "locked", rank: 1 },
+      top: [
+        {
+          id: "mock-anchor",
+          label: "locked",
+          rank: 1,
+          reasons: ["single option from resolver (trust: manifest)"],
+        },
+      ],
+    });
+  });
+
+  it("records the choice on a run that fails right after routing", async () => {
+    const audit = new InMemoryAuditLog();
+    const r = await execute(intent("route-audit-3"), corridor(), {
+      ...deps(),
+      trustManifestWithoutAttestation: false,
+      resolver: ranked,
+      audit,
+    });
+    expect(r.ok).toBe(false);
+    const failed = audit.entries.find((e) => e.to === "failed");
+    expect(failed?.from).toBe("created");
+    expect(failed?.route?.chosen).toEqual({ id: "anchor-x", label: "locked", rank: 1 });
+  });
+
+  it("records no price label when the run fails before it is quoted and the resolver gave none", async () => {
+    const audit = new InMemoryAuditLog();
+    const r = await execute(intent("route-audit-unquoted"), corridor(), {
+      ...deps(),
+      trustManifestWithoutAttestation: false,
+      resolver: resolverWith({
+        chosen: "anchor-x",
+        options: [{ id: "anchor-x", rank: 1, reasons: ["only option"] }],
+      }),
+      audit,
+    });
+    expect(r.ok).toBe(false);
+    const failed = audit.entries.find((e) => e.to === "failed");
+    expect(failed?.from).toBe("created");
+    expect(failed?.route?.chosen).toEqual({ id: "anchor-x", rank: 1 });
+  });
+
+  it("does not record a route when the resolver refuses", async () => {
+    const audit = new InMemoryAuditLog();
+    const r = await execute(intent("route-audit-4"), corridor(), {
+      ...deps(),
+      resolver: {
+        async resolve() {
+          throw new Error("no attested anchor");
+        },
+      },
+      audit,
+    });
+    expect(r.ok).toBe(false);
+    expect(audit.entries.some((e) => e.route)).toBe(false);
+  });
+
+  it("routeChoiceFor bounds what a resolver can write and falls back when chosen is unknown", () => {
+    const receiving = createMockAdapter({ name: "anchor-x" });
+    const long = "r".repeat(500);
+    const choice = routeChoiceFor({
+      receiving,
+      trust: "attested",
+      ranking: {
+        chosen: "anchor-x",
+        options: [
+          {
+            id: "anchor-x",
+            label: "indicative",
+            rank: 1,
+            reasons: [long, "b", "c", "d", "e", "f", "g"],
+          },
+        ],
+      },
+    });
+    expect(choice.chosen.label).toBe("indicative");
+    expect(choice.top[0]!.reasons).toHaveLength(5);
+    expect(choice.top[0]!.reasons[0]!.length).toBe(200);
+
+    const fallback = routeChoiceFor({
+      receiving,
+      trust: "attested",
+      ranking: {
+        chosen: "missing",
+        options: [{ id: "a", label: "locked", rank: 1, reasons: [] }],
+      },
+    });
+    expect(fallback.chosen).toEqual({ id: "anchor-x", rank: 1 });
+    expect(routeChoiceFor({ receiving, trust: "attested" }, "indicative").chosen).toEqual({
+      id: "anchor-x",
+      label: "indicative",
+      rank: 1,
+    });
+  });
+
+  it("routeChoiceFor records only the three RFC 0004 price labels", () => {
+    const receiving = createMockAdapter({ name: "anchor-x" });
+    // A JavaScript resolver is not held to the type: a display name or an
+    // unknown label must never reach the trail as a price label.
+    const options = [
+      { id: "anchor-x", label: "Anchor X (MXN, SPEI)", rank: 1, reasons: [] },
+      { id: "anchor-y", label: "guaranteed", rank: 2, reasons: [] },
+      { id: "anchor-z", label: "estimated", rank: 3, reasons: [] },
+    ] as unknown as RankedOption[];
+    const choice = routeChoiceFor(
+      { receiving, trust: "attested", ranking: { chosen: "anchor-x", options } },
+      "locked",
+    );
+    // The chosen option's invalid label falls back to the run's quote label.
+    expect(choice.chosen).toEqual({ id: "anchor-x", label: "locked", rank: 1 });
+    expect(choice.top.map((o) => o.label)).toEqual([undefined, undefined, "estimated"]);
+    expect(choice.top[1]).not.toHaveProperty("label");
+    expect(JSON.stringify(choice)).not.toContain("guaranteed");
+    expect(JSON.stringify(choice)).not.toContain("SPEI");
   });
 });

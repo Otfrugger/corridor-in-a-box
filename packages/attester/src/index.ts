@@ -5,10 +5,12 @@
 // the signer is enrolled and applies the per-domain cooldown before relaying to
 // the registry.
 //
-// There are two writes because there are two kinds of fact: `attest` submits the
-// bitmaps and the toml hash, `attestMeta` submits the receive assets it observed
-// and the country the anchor declared about itself. Each has its own cooldown, so
-// a sweep can submit both for the same domain in one ledger.
+// There are three writes because there are three things to say: `attest` submits
+// the bitmaps and the toml hash, `attestMeta` submits the receive assets it
+// observed and the country the anchor declared about itself, and `attestReceive`
+// submits the same receive list with the amount bounds stated for each asset.
+// Each has its own cooldown, so a sweep can submit all of them for one domain in
+// one ledger.
 //
 // This is the ONLY place a signing key is needed. Reading the registry
 // (@corridor/registry) requires nothing.
@@ -23,7 +25,15 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { isCanonicalDomain, probeBit, type ProbeResult } from "@corridor/probe";
-import { err, fail, ok, type CorridorError, type Outcome } from "@corridor/types";
+import {
+  err,
+  fail,
+  ok,
+  STROOP_SCALE,
+  toScaled,
+  type CorridorError,
+  type Outcome,
+} from "@corridor/types";
 
 export interface AttesterOptions {
   rpcUrl: string;
@@ -59,6 +69,7 @@ export enum AttesterContractError {
   InvalidAssetCode = 6,
   DuplicateAsset = 7,
   InvalidCountry = 8,
+  InvalidAmount = 9,
 }
 
 /**
@@ -79,6 +90,7 @@ const CONTRACT_ERRORS: Record<AttesterContractError, string> = {
   [AttesterContractError.DuplicateAsset]: "the same asset code was written twice",
   [AttesterContractError.InvalidCountry]:
     "country must be an ISO-3166-1 alpha-2 code, two uppercase letters",
+  [AttesterContractError.InvalidAmount]: "a receive bound is negative",
 };
 
 /**
@@ -88,6 +100,26 @@ const CONTRACT_ERRORS: Record<AttesterContractError, string> = {
  */
 export interface AttesterError extends CorridorError {
   readonly contractError?: AttesterContractError | number;
+  /**
+   * Set when the write has nowhere to land: the deployed attester contract, or
+   * the registry it relays to, has no such method because it was deployed before
+   * the write existed. It has to be upgraded before it can take one. This is not
+   * a rejection of the data, and nothing about the domain is wrong, so a caller
+   * can skip the write and carry on.
+   */
+  readonly methodMissing?: true;
+}
+
+/**
+ * What a simulation reports when the contract has no function of the name that
+ * was called. Read from the deployed testnet contracts, not guessed: a contract
+ * error is `Error(Contract, #n)`, and this is the other shape.
+ */
+const MISSING_METHOD = "Error(WasmVm, MissingValue)";
+
+/** Whether a simulation failed because the deployed contract lacks the method. */
+export function isMissingMethod(error: string): boolean {
+  return error.includes(MISSING_METHOD);
 }
 
 export class AnchorAttester {
@@ -191,6 +223,66 @@ export class AnchorAttester {
   }
 
   /**
+   * Submit the receive list of a probe result with its amount bounds: every
+   * asset the SEP-31 probe OBSERVED, and the `min_amount` and `max_amount` the
+   * anchor stated for each.
+   *
+   * Refuses locally when there is no observation to submit, for the reason
+   * {@link AnchorAttester.attestMeta} does. A bound the probe left out is sent as
+   * absent, never as zero: "the anchor stated no minimum" and "the minimum is
+   * zero" are different facts, and the contract keeps them apart.
+   *
+   * `attest_receive` has its own cooldown on chain, so it can follow the other
+   * two writes in the same ledger. Contracts deployed before this write existed
+   * have no such method; that comes back as an error with `methodMissing` set, and
+   * nothing is sent.
+   */
+  async attestReceive(result: ProbeResult): Promise<Outcome<AttestationRef, AttesterError>> {
+    const bad = nonCanonicalDomain(result.domain);
+    if (bad) return bad;
+
+    const ran = (result.probesRun & probeBit("sep31_info")) !== 0;
+    if (!ran || result.receiveLimits === undefined) {
+      return fail(
+        "MANIFEST_INVALID",
+        `${result.domain}: no observed receive list to submit — sep31_info ` +
+          `${ran ? "ran and failed" : "never ran"}. Not sending an empty list for a ` +
+          `probe that produced no answer.`,
+      );
+    }
+
+    const assets: xdr.ScVal[] = [];
+    for (const asset of result.receiveLimits) {
+      const min = scaledBound(asset.minAmount);
+      const max = scaledBound(asset.maxAmount);
+      if (min === false || max === false) {
+        return fail(
+          "AMOUNT_INVALID",
+          `${result.domain}: ${asset.code} has a bound that is not a non-negative decimal ` +
+            `of at most ${STROOP_SCALE} places. Not rounding it into one.`,
+        );
+      }
+      // A contract struct is a map keyed by field name, in key order.
+      assets.push(
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("code"),
+            val: nativeToScVal(asset.code, { type: "string" }),
+          }),
+          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("max_amount"), val: max }),
+          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("min_amount"), val: min }),
+        ]),
+      );
+    }
+
+    return this.submit("attest_receive", result.domain, [
+      nativeToScVal(this.signer.publicKey(), { type: "address" }),
+      nativeToScVal(result.domain, { type: "string" }),
+      xdr.ScVal.scvVec(assets),
+    ]);
+  }
+
+  /**
    * Simulate, then sign, send and confirm one contract call.
    *
    * Both writes go through here so a contract revert is reported the same way
@@ -216,6 +308,15 @@ export class AnchorAttester {
       // AND surfaces a contract revert before anything is paid for.
       const sim = await this.server.simulateTransaction(built);
       if (rpc.Api.isSimulationError(sim)) {
+        if (isMissingMethod(sim.error)) {
+          const missing = fail(
+            "CAPABILITY_MISMATCH",
+            `${domain}: ${method} is not deployed. The attester contract, or the ` +
+              `registry it relays to, predates this write; upgrade() them before ` +
+              `submitting one.`,
+          );
+          return err({ ...missing.error, methodMissing: true });
+        }
         const { code, message } = explain(sim.error);
         const failed = fail("MANIFEST_INVALID", `${domain}: ${message}`);
         return code === undefined ? failed : err({ ...failed.error, contractError: code });
@@ -277,7 +378,21 @@ const REGISTRY_CODE_HINT: Record<number, string> = {
   4: "if the registry raised it: a SEP or probe bit the deployed registry does not know (UnknownBit); upgrade() the registry to the current PROBE_NAMES",
 };
 
-/** The local refusal shared by both submission paths, or undefined when the domain is fine. */
+const MAX_I128 = (1n << 127n) - 1n;
+
+/**
+ * One receive bound as the contract takes it: `Option<i128>` on the 10^7 scale.
+ * Absent becomes Void, which Soroban reads as `None`. `false` when the text is
+ * not an amount the contract would accept, so the caller can refuse to send it.
+ */
+function scaledBound(amount: string | undefined): xdr.ScVal | false {
+  if (amount === undefined) return xdr.ScVal.scvVoid();
+  const scaled = toScaled(amount, STROOP_SCALE);
+  if (!scaled.ok || scaled.value < 0n || scaled.value > MAX_I128) return false;
+  return nativeToScVal(scaled.value, { type: "i128" });
+}
+
+/** The local refusal shared by every submission path, or undefined when the domain is fine. */
 function nonCanonicalDomain(domain: string): Outcome<never, AttesterError> | undefined {
   if (isCanonicalDomain(domain)) return undefined;
   return fail(

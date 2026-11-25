@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runEngineDemoPayment } from "../web/lib/engine-demo";
+import { getEngineDemoPayment, runEngineDemoPayment } from "../web/lib/engine-demo";
 
 let runNumber = 0;
 
@@ -64,5 +64,27 @@ describe("web payment engine demo", () => {
 
     expect(replay.idempotentReplay).toBe(true);
     expect(replay.trail).toEqual(["completed"]);
+  });
+  it("serves a run's status the way the service's GET /payments/:key does", async () => {
+    const key = `web-engine-demo-status-${++runNumber}`;
+    const result = await runEngineDemoPayment("reference-testnet", "1.00", key, "happy");
+    const status = await getEngineDemoPayment(key);
+
+    expect(status).toMatchObject({
+      idempotencyKey: key,
+      corridorId: "reference-testnet",
+      state: "completed",
+      stellarTxHash: result.stellarTxHash,
+    });
+    expect(await getEngineDemoPayment("web-engine-demo-unknown")).toBeUndefined();
+  });
+
+  it("reports a failed run's error code and no message", async () => {
+    const key = `web-engine-demo-status-${++runNumber}`;
+    await runEngineDemoPayment("reference-testnet", "1.00", key, "quote-expired");
+    const status = await getEngineDemoPayment(key);
+
+    expect(status?.state).toBe("failed");
+    expect(status?.error).toBe("QUOTE_EXPIRED");
   });
 });

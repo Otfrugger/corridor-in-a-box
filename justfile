@@ -44,6 +44,7 @@ check:
     pnpm lint
     pnpm typecheck
     pnpm test
+    pnpm example:plan-and-pay
 
 # The wasm build is not decoration: a contract that compiles natively can still
 # fail to link for wasm32 (two contracts exporting __constructor, for one), and

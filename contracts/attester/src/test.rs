@@ -748,3 +748,400 @@ fn attesting_metadata_extends_the_marker_the_enrolment_and_the_instance() {
     );
     assert_eq!(instance_ttl(&f), TTL_EXTEND_TO);
 }
+
+// ─── Receive list: the third write ───────────────────────────────────────────
+//
+// `attest_receive` relays the SEP-31 receive list, with the bounds stated for
+// each asset, to the registry's `put_receive`. Same gates as the other two
+// writes, its own cooldown, and its own mirror of a registry type.
+
+/// One whole unit of an asset on the registry's scale.
+const ONE: i128 = 10_000_000;
+
+fn entry(env: &Env, code: &str, min: Option<i128>, max: Option<i128>) -> ReceiveAsset {
+    ReceiveAsset {
+        code: String::from_str(env, code),
+        min_amount: min,
+        max_amount: max,
+    }
+}
+
+fn receive(env: &Env, entries: &[(&str, Option<i128>, Option<i128>)]) -> Vec<ReceiveAsset> {
+    let mut v = Vec::new(env);
+    for (code, min, max) in entries {
+        v.push_back(entry(env, code, *min, *max));
+    }
+    v
+}
+
+fn unbounded(env: &Env, names: &[&str]) -> Vec<ReceiveAsset> {
+    let mut v = Vec::new(env);
+    for code in names {
+        v.push_back(entry(env, code, None, None));
+    }
+    v
+}
+
+#[test]
+fn a_receive_list_arrives_in_the_registry_as_it_was_sent() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    f.attester_client.attest_receive(
+        &f.alice,
+        &d,
+        &receive(
+            &f.env,
+            &[
+                ("NGN", Some(1_000 * ONE), Some(5_000_000 * ONE)),
+                ("USDC", Some(ONE / 10), None),
+                ("KES", None, None),
+            ],
+        ),
+    );
+
+    // Read back through the registry's OWN type. This crate's `ReceiveAsset` is
+    // a mirror of it, so matching here field by field is what shows the two
+    // agree on the wire, names and all.
+    let got = f.registry_client.get_receive(&d);
+    assert_eq!(got.domain, d);
+    assert_eq!(got.assets.len(), 3);
+    let expect = [
+        ("NGN", Some(1_000 * ONE), Some(5_000_000 * ONE)),
+        ("USDC", Some(ONE / 10), None),
+        ("KES", None, None),
+    ];
+    for (i, (code, min, max)) in expect.iter().enumerate() {
+        let a: corridor_registry::ReceiveAsset = got.assets.get_unchecked(i as u32);
+        assert_eq!(a.code, String::from_str(&f.env, code));
+        assert_eq!(a.min_amount, *min, "{code} min");
+        assert_eq!(a.max_amount, *max, "{code} max");
+    }
+    // Attributed to the signer, at the ledger it was submitted in.
+    assert_eq!(got.attester, f.alice);
+    assert_eq!(got.attested_ledger, 10_000);
+}
+
+#[test]
+fn a_receive_list_for_a_domain_that_was_never_attested_fails_through_the_relay() {
+    let f = setup();
+    let d = domain(&f.env);
+
+    let res = f
+        .attester_client
+        .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"]));
+    assert!(
+        res.is_err(),
+        "the registry's refusal must propagate, not be relayed as a success"
+    );
+    assert_eq!(
+        f.registry_client.try_get_receive(&d),
+        Err(Ok(corridor_registry::Error::NotFound))
+    );
+    // A refused write must not start the cooldown either: once the record
+    // exists, the list goes through in the same ledger.
+    attest(&f, &d);
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"])),
+        Ok(Ok(()))
+    );
+}
+
+#[test]
+fn an_unenrolled_signer_cannot_write_a_receive_list() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+    let mallory = Address::generate(&f.env);
+
+    let res = f
+        .attester_client
+        .try_attest_receive(&mallory, &d, &unbounded(&f.env, &["NGN"]));
+    assert_eq!(res, Err(Ok(Error::NotAnAttester)));
+    assert_eq!(
+        f.registry_client.try_get_receive(&d),
+        Err(Ok(corridor_registry::Error::NotFound))
+    );
+}
+
+#[test]
+fn rejects_a_non_canonical_domain_when_submitting_a_receive_list() {
+    let f = setup();
+    for spelled in ["", "TestAnchor.Stellar.Org", "testanchor.stellar.org."] {
+        let res = f.attester_client.try_attest_receive(
+            &f.alice,
+            &String::from_str(&f.env, spelled),
+            &unbounded(&f.env, &["NGN"]),
+        );
+        assert_eq!(res, Err(Ok(Error::InvalidDomain)), "accepted {spelled:?}");
+    }
+}
+
+#[test]
+fn a_sweep_can_submit_all_three_writes_in_the_same_ledger() {
+    // Three cooldown keys, because a sweep sends the three writes for a domain
+    // back to back and a shared marker would fail the later ones every time.
+    let f = setup();
+    let d = domain(&f.env);
+
+    attest(&f, &d);
+    assert_eq!(
+        f.attester_client
+            .try_attest_meta(&f.alice, &d, &codes(&f.env, &["NGN"]), &None),
+        Ok(Ok(()))
+    );
+    assert_eq!(
+        f.attester_client.try_attest_receive(
+            &f.alice,
+            &d,
+            &receive(&f.env, &[("NGN", Some(ONE), None)])
+        ),
+        Ok(Ok(()))
+    );
+
+    // And now each is in its own cooldown.
+    assert_eq!(
+        f.attester_client.try_attest_receive(
+            &f.alice,
+            &d,
+            &receive(&f.env, &[("NGN", Some(ONE), None)])
+        ),
+        Err(Ok(Error::TooSoon))
+    );
+}
+
+#[test]
+fn the_receive_list_keeps_its_own_clock() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    // Written first this time: it must not put the metadata write, which has
+    // not been made yet, into cooldown.
+    f.attester_client
+        .attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"]));
+    assert_eq!(
+        f.attester_client
+            .try_attest_meta(&f.alice, &d, &codes(&f.env, &["NGN"]), &None),
+        Ok(Ok(()))
+    );
+
+    advance(&f, MIN_INTERVAL - 1);
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"])),
+        Err(Ok(Error::TooSoon))
+    );
+    advance(&f, 1);
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN", "KES"])),
+        Ok(Ok(()))
+    );
+    assert_eq!(f.registry_client.get_receive(&d).assets.len(), 2);
+}
+
+#[test]
+fn the_receive_cooldown_is_per_domain() {
+    let f = setup();
+    let a = domain(&f.env);
+    let b = String::from_str(&f.env, "other.example");
+    attest(&f, &a);
+    f.attester_client
+        .attest(&f.alice, &b, &SEP31, &hash(&f.env, 2), &0, &0);
+
+    f.attester_client
+        .attest_receive(&f.alice, &a, &unbounded(&f.env, &["NGN"]));
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &b, &unbounded(&f.env, &["KES"])),
+        Ok(Ok(()))
+    );
+}
+
+#[test]
+fn rejects_a_negative_bound_with_this_contracts_error() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    for (min, max) in [(Some(-1), None), (None, Some(-1)), (Some(ONE), Some(-ONE))] {
+        let res = f.attester_client.try_attest_receive(
+            &f.alice,
+            &d,
+            &receive(&f.env, &[("NGN", min, max)]),
+        );
+        assert_eq!(
+            res,
+            Err(Ok(Error::InvalidAmount)),
+            "accepted {min:?}..{max:?}"
+        );
+    }
+    // A minimum above the maximum is what the anchor said, and goes through.
+    assert_eq!(
+        f.attester_client.try_attest_receive(
+            &f.alice,
+            &d,
+            &receive(&f.env, &[("NGN", Some(9 * ONE), Some(ONE))])
+        ),
+        Ok(Ok(()))
+    );
+}
+
+#[test]
+fn rejects_a_receive_list_beyond_the_bound() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &ASSET_NAMES)),
+        Err(Ok(Error::TooManyAssets))
+    );
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &ASSET_NAMES[..32])),
+        Ok(Ok(()))
+    );
+}
+
+#[test]
+fn rejects_blank_and_duplicated_codes_in_a_receive_list() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &[""])),
+        Err(Ok(Error::InvalidAssetCode))
+    );
+    assert_eq!(
+        f.attester_client.try_attest_receive(
+            &f.alice,
+            &d,
+            &receive(
+                &f.env,
+                &[
+                    ("NGN", Some(ONE), None),
+                    ("KES", None, None),
+                    ("NGN", Some(2 * ONE), None)
+                ]
+            )
+        ),
+        Err(Ok(Error::DuplicateAsset))
+    );
+}
+
+#[test]
+fn refuses_a_receive_list_before_the_registry_would_see_it() {
+    // Checked here so the caller gets THIS contract's error numbering, and so a
+    // rejected submission never reaches the cross-call or starts a cooldown.
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    let res = f.attester_client.try_attest_receive(
+        &f.alice,
+        &d,
+        &receive(&f.env, &[("NGN", Some(-1), None)]),
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidAmount)));
+    assert_eq!(
+        f.registry_client.try_get_receive(&d),
+        Err(Ok(corridor_registry::Error::NotFound)),
+        "a rejected submission must not leave a list behind"
+    );
+    assert_eq!(
+        f.attester_client
+            .try_attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"])),
+        Ok(Ok(())),
+        "a rejected submission must not start the cooldown"
+    );
+}
+
+#[test]
+fn the_new_error_numbers_are_the_ones_the_clients_branch_on() {
+    // `@corridor/attester` and `@corridor/registry` mirror these as numbers.
+    // Appended, never renumbered: a host error names the number, not the name.
+    assert_eq!(Error::InvalidAmount as u32, 9);
+    assert_eq!(corridor_registry::Error::InvalidAmount as u32, 11);
+    assert_eq!(Error::InvalidCountry as u32, 8);
+    assert_eq!(corridor_registry::Error::InvalidCountry as u32, 10);
+}
+
+#[test]
+fn attesting_a_receive_list_extends_the_marker_the_enrolment_and_the_instance() {
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+    f.attester_client
+        .attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"]));
+    advance(&f, TTL_EXTEND_TO - 100);
+
+    f.attester_client
+        .attest_receive(&f.alice, &d, &unbounded(&f.env, &["NGN"]));
+
+    assert_eq!(
+        entry_ttl(&f, &DataKey::LastReceive(d.clone())),
+        TTL_EXTEND_TO
+    );
+    assert_eq!(
+        entry_ttl(&f, &DataKey::Attester(f.alice.clone())),
+        TTL_EXTEND_TO
+    );
+    assert_eq!(instance_ttl(&f), TTL_EXTEND_TO);
+}
+
+// ─── One set of bytes for both languages ─────────────────────────────────────
+
+/// The receive list `tests/attester-receive.test.ts` asserts the TypeScript client
+/// sends, byte for byte: NGN from 1000 to 5000000, USDC from 0.1, and KES with no
+/// bounds. The same string is a constant in that test. If the encoding ever has to
+/// change, it changes in both places or the two stop agreeing.
+const GOLDEN_RECEIVE_LIST: &str = concat!(
+    "AAAAEAAAAAEAAAADAAAAEQAAAAEAAAADAAAADwAAAARjb2RlAAAADgAAAANOR04AAAAADwAAAAptYXhf",
+    "YW1vdW50AAAAAAAKAAAAAAAAAAAAAC15iD0gAAAAAA8AAAAKbWluX2Ftb3VudAAAAAAACgAAAAAAAAAA",
+    "AAAAAlQL5AAAAAARAAAAAQAAAAMAAAAPAAAABGNvZGUAAAAOAAAABFVTREMAAAAPAAAACm1heF9hbW91",
+    "bnQAAAAAAAEAAAAPAAAACm1pbl9hbW91bnQAAAAAAAoAAAAAAAAAAAAAAAAAD0JAAAAAEQAAAAEAAAAD",
+    "AAAADwAAAARjb2RlAAAADgAAAANLRVMAAAAADwAAAAptYXhfYW1vdW50AAAAAAABAAAADwAAAAptaW5f",
+    "YW1vdW50AAAAAAAB",
+);
+
+#[test]
+fn decodes_the_receive_list_the_typescript_client_sends() {
+    use soroban_sdk::xdr::{Limits, ReadXdr, ScVal};
+    use soroban_sdk::{TryFromVal, Val};
+
+    let f = setup();
+    let d = domain(&f.env);
+    attest(&f, &d);
+
+    let sc = ScVal::from_xdr_base64(GOLDEN_RECEIVE_LIST, Limits::none()).unwrap();
+    let val = Val::try_from_val(&f.env, &sc).unwrap();
+    let sent = Vec::<ReceiveAsset>::try_from_val(&f.env, &val).unwrap();
+
+    assert_eq!(
+        sent,
+        receive(
+            &f.env,
+            &[
+                ("NGN", Some(1_000 * ONE), Some(5_000_000 * ONE)),
+                ("USDC", Some(ONE / 10), None),
+                ("KES", None, None),
+            ]
+        )
+    );
+
+    // And it travels the whole path: through this contract, into the registry.
+    f.attester_client.attest_receive(&f.alice, &d, &sent);
+    let stored = f.registry_client.get_receive(&d);
+    assert_eq!(stored.assets.len(), 3);
+    let usdc = stored.assets.get_unchecked(1);
+    assert_eq!(usdc.code, String::from_str(&f.env, "USDC"));
+    assert_eq!(usdc.min_amount, Some(1_000_000));
+    assert_eq!(usdc.max_amount, None);
+}

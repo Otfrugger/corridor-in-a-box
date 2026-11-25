@@ -15,7 +15,7 @@ import {
 } from "node:http";
 import * as crypto from "node:crypto";
 import type { Corridor } from "@corridor/manifest";
-import { execute, type EngineDeps } from "@corridor/engine";
+import { execute, type EngineDeps, type ExecuteOptions } from "@corridor/engine";
 import {
   constantTimeEqual,
   err,
@@ -26,6 +26,23 @@ import {
   type PartyRef,
   type PaymentIntent,
 } from "@corridor/types";
+import {
+  parseChosenRouteOption,
+  signRouteOption,
+  verifyRouteOption,
+  type ChosenRouteOption,
+  type ChosenRouteOptionPayload,
+  type ChosenRouteOptionQuote,
+  type RouteOptionRejection,
+} from "./route-option";
+
+export { signRouteOption, verifyRouteOption };
+export type {
+  ChosenRouteOption,
+  ChosenRouteOptionPayload,
+  ChosenRouteOptionQuote,
+  RouteOptionRejection,
+};
 
 export interface RateLimitOptions {
   /** Bucket size (max burst). */
@@ -98,6 +115,11 @@ export interface ServiceOptions {
    * Timeout in milliseconds for each individual readiness check. Default 5000 ms.
    */
   readinessTimeoutMs?: number;
+  /**
+   * HMAC-SHA256 key used to verify signed `routeOption` payloads submitted on
+   * `POST /payments`. Fails closed when omitted and a client submits `routeOption`.
+   */
+  routeOptionSecret?: string;
 }
 
 /** Default cap on a buffered request body. A payment intent is well under 1 KiB. */
@@ -232,6 +254,9 @@ export const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   // like CORRIDOR_HALTED: a well-formed request refused because no trusted
   // route is available, not a fault in the caller's input or in this server.
   ROUTE_REFUSED: 503,
+  // Raised by the service before the engine runs. The response status follows the
+  // failed check (400 bad signature, 409 expired, 422 otherwise); 422 is the default.
+  ROUTE_OPTION_INVALID: 422,
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */
@@ -306,7 +331,12 @@ const PAYMENT_FIELDS = new Set([
   "recipient",
   "sourceAmount",
   "destinationFields",
+  "routeOption",
 ]);
+
+export type ParsedPaymentIntent = PaymentIntent & {
+  routeOption?: ChosenRouteOption;
+};
 
 /** idempotencyKey becomes a Postgres primary key and a log field. Bounded and
  *  charset-checked here the same way the web route bounds it (web/app/api/payments/route.ts):
@@ -375,7 +405,7 @@ function parseParty(
  * error mapping follows): field names and bounds, never upstream URLs or
  * response bodies.
  */
-export function parsePaymentBody(o: unknown): Outcome<PaymentIntent, PaymentBodyError> {
+export function parsePaymentBody(o: unknown): Outcome<ParsedPaymentIntent, PaymentBodyError> {
   if (!isPlainObject(o)) {
     return reject("<body>", "expected a JSON object");
   }
@@ -458,6 +488,15 @@ export function parsePaymentBody(o: unknown): Outcome<PaymentIntent, PaymentBody
     }
   }
 
+  let routeOption: ChosenRouteOption | undefined;
+  if (o.routeOption !== undefined) {
+    const parsedOption = parseChosenRouteOption(o.routeOption);
+    if (!parsedOption.ok) {
+      return reject("routeOption", parsedOption.error);
+    }
+    routeOption = parsedOption.value;
+  }
+
   return ok({
     idempotencyKey,
     corridorId,
@@ -465,6 +504,7 @@ export function parsePaymentBody(o: unknown): Outcome<PaymentIntent, PaymentBody
     recipient,
     sourceAmount,
     ...(destinationFields ? { destinationFields } : {}),
+    ...(routeOption ? { routeOption } : {}),
   });
 }
 
@@ -667,14 +707,53 @@ export function createService(options: ServiceOptions): Service {
           },
         };
       }
+
+      const { routeOption, ...paymentIntent } = intent;
+      // A locked option carries the quote the sender was shown. It goes to the engine as
+      // ExecuteOptions.quote (#733), which honours it and refuses it once expired
+      // (QUOTE_EXPIRED) instead of re-quoting at a different rate.
+      let pinnedQuote: ExecuteOptions["quote"];
+      if (routeOption !== undefined) {
+        const verified = verifyRouteOption(routeOption, options.routeOptionSecret, {
+          corridorId: paymentIntent.corridorId,
+          sourceAmount: paymentIntent.sourceAmount,
+          receivingDomain: corridor.dest.endpoints.home_domain,
+          nowMs: now(),
+        });
+        if (!verified.ok) {
+          return {
+            status: verified.error.status,
+            body: {
+              error: "ROUTE_OPTION_INVALID",
+              reason: verified.error.code,
+              field: "routeOption",
+              message: verified.error.message,
+            },
+          };
+        }
+        if (verified.value.label === "locked" && verified.value.quote) {
+          const pinned = verified.value.quote;
+          pinnedQuote = {
+            id: pinned.id,
+            price: pinned.price,
+            expiresAt: pinned.expiresAt,
+            sourceAmount: pinned.sourceAmount,
+            destAmount: pinned.destAmount,
+            ...(pinned.fee ? { fee: pinned.fee } : {}),
+            firm: true,
+          };
+        }
+      }
+
       // Owner comes from the VALIDATED bearer, never from the body — a client
       // must not be able to claim another tenant's runs by asking.
       // The request id travels with it: every log line and audit entry the run
       // produces is stamped with the same id this response echoes.
-      const p = execute(intent, corridor, options.deps, {
+      const p = execute(paymentIntent, corridor, options.deps, {
         owner: presentedKey,
         requestId: ctx.requestId,
         ...(ctx.traceparent ? { traceparent: ctx.traceparent } : {}),
+        ...(pinnedQuote ? { quote: pinnedQuote } : {}),
       });
       trackExecution(intent.idempotencyKey, p);
       const result = await p;
@@ -749,6 +828,22 @@ export function createService(options: ServiceOptions): Service {
       if (!run || (options.apiKeys && !ownerMatches(run.owner, presentedKey))) {
         return { status: 404, body: { error: "not found" } };
       }
+      const corridor = options.corridors.get(run.corridorId);
+      const runRoute = run as typeof run & {
+        receivingDomain?: string;
+        routeProtocol?: string;
+        priceLabel?: "locked" | "indicative" | "estimated";
+      };
+      const receivingDomain = runRoute.receivingDomain ?? corridor?.dest.endpoints.home_domain;
+      const protocol = runRoute.routeProtocol ?? corridor?.dest.protocol;
+      const priceLabel =
+        runRoute.priceLabel ??
+        (run.quoteFirm === true
+          ? "locked"
+          : run.quoteFirm === false
+            ? "indicative"
+            : undefined);
+
       return {
         status: 200,
         body: {
@@ -757,6 +852,8 @@ export function createService(options: ServiceOptions): Service {
           state: run.state,
           transactionId: run.transactionId,
           stellarTxHash: run.stellarTxHash,
+          ...(receivingDomain && protocol ? { route: { receivingDomain, protocol } } : {}),
+          ...(priceLabel ? { price: { label: priceLabel } } : {}),
           // Only the error CODE, never the stored message: lastError is
           // `${code}: ${message}` and the message carries anchor URLs, upstream
           // HTTP bodies and other internals the caller has no business seeing.

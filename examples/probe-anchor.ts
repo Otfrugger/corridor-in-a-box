@@ -10,6 +10,7 @@
 import {
   decodeProbes,
   decodeSeps,
+  describeReceiveLimits,
   formatProbeResultJson,
   parseProbeArgs,
   probeAnchor,
@@ -45,6 +46,12 @@ async function main(): Promise<void> {
   console.log(`  advertises     ${advertised.map((n) => `SEP-${n}`).join(", ") || "none"}`);
   console.log(`  probes passed  ${decodeProbes(r.probesPassed).join(", ") || "none"}`);
   console.log(`  probes FAILED  ${failed.join(", ") || "none"}`);
+  if (r.receiveLimits) {
+    console.log(`  receive limits ${describeReceiveLimits(r.receiveLimits)}`);
+  }
+  if (r.tomlFailureReason) {
+    console.log(`  toml failure   ${r.tomlFailureReason}`);
+  }
   console.log(`  toml_hash      ${r.tomlHash}`);
   console.log(`\n  seps=${r.seps} probes_run=${r.probesRun} probes_passed=${r.probesPassed}`);
   console.log(`\nSubmit with: pnpm attest ${domain}`);

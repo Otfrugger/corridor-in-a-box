@@ -104,12 +104,17 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/RunResult" }
         "400":
-          description: The body is not a valid payment. `field` names the offending input.
+          description: >-
+            The body is not a valid payment (`field` names the offending input), or its signed
+            routeOption carries a bad signature (ROUTE_OPTION_INVALID).
           headers:
             x-request-id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/InvalidBody" }
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/InvalidBody" }
+                  - { $ref: "#/components/schemas/RouteOptionInvalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404":
           description: The corridor id is not served by this process.
@@ -265,6 +270,7 @@ components:
             oneOf:
               - { $ref: "#/components/schemas/EngineError" }
               - { $ref: "#/components/schemas/AmountInvalid" }
+              - { $ref: "#/components/schemas/RouteOptionInvalid" }
   schemas:
     Money:
       type: object
@@ -307,6 +313,39 @@ components:
           type: object
           maxProperties: 50
           additionalProperties: { type: string, maxLength: 256 }
+        routeOption:
+          $ref: "#/components/schemas/ChosenRouteOption"
+    ChosenRouteOptionQuote:
+      type: object
+      required: [id, sourceAmount, destAmount, price, expiresAt]
+      additionalProperties: false
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        sourceAmount: { $ref: "#/components/schemas/Money" }
+        destAmount: { $ref: "#/components/schemas/Money" }
+        price: { type: string, pattern: "^[0-9]+(\\.[0-9]+)?$" }
+        fee: { $ref: "#/components/schemas/Money" }
+        expiresAt: { type: number }
+    ChosenRouteOption:
+      type: object
+      required:
+        - corridorId
+        - receivingDomain
+        - protocol
+        - label
+        - sourceAmount
+        - expiresAt
+        - signature
+      additionalProperties: false
+      properties:
+        corridorId: { type: string, minLength: 1, maxLength: 128 }
+        receivingDomain: { type: string, minLength: 1, maxLength: 255 }
+        protocol: { type: string, enum: [sep31, sep6, wallet] }
+        label: { type: string, enum: [locked, indicative, estimated] }
+        sourceAmount: { $ref: "#/components/schemas/Money" }
+        expiresAt: { type: number }
+        quote: { $ref: "#/components/schemas/ChosenRouteOptionQuote" }
+        signature: { type: string, minLength: 1, maxLength: 256 }
     CorridorState:
       type: string
       enum:
@@ -365,6 +404,19 @@ components:
         state: { $ref: "#/components/schemas/CorridorState" }
         transactionId: { type: string }
         stellarTxHash: { type: string }
+        route:
+          type: object
+          additionalProperties: false
+          required: [receivingDomain, protocol]
+          properties:
+            receivingDomain: { type: string }
+            protocol: { type: string }
+        price:
+          type: object
+          additionalProperties: false
+          required: [label]
+          properties:
+            label: { enum: [locked, indicative, estimated] }
         error:
           type: string
           description: The error code only, never its message.
@@ -398,6 +450,7 @@ components:
         - CORRIDOR_HALTED
         - DRY_RUN_COMPLETE
         - ROUTE_REFUSED
+        - ROUTE_OPTION_INVALID
     EngineError:
       type: object
       required: [error, message]
@@ -412,6 +465,19 @@ components:
       properties:
         error: { const: AMOUNT_INVALID }
         field: { enum: [sourceAmount.amount, sourceAmount.asset] }
+        message: { type: string }
+    RouteOptionInvalid:
+      type: object
+      description: >-
+        The signed routeOption failed verification before any run started. 400 for a bad
+        signature, 409 once it has expired, 422 for every other reason.
+      required: [error, reason, field, message]
+      additionalProperties: false
+      properties:
+        error: { const: ROUTE_OPTION_INVALID }
+        reason:
+          { enum: [UNCONFIGURED, INVALID_SIGNATURE, EXPIRED, MISMATCH, INVALID_LOCKED_QUOTE] }
+        field: { const: routeOption }
         message: { type: string }
     InvalidBody:
       type: object

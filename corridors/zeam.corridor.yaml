@@ -30,8 +30,30 @@
 #
 # What is NOT true: no payment has been attempted, and none should be without a
 # KYC'd business relationship with Zeam — this repo has no such relationship.
+#
+# Testnet / sandbox attempt (issue #682), checked 2026-11-24:
+#   - Zeam's stellar.toml (mint.zeam.money, sha256
+#     03c5c1227b7e5781cc247bee74ac02b98bf2f41173543747f25e4be6da1dfcd9) declares
+#     only NETWORK_PASSPHRASE "Public Global Stellar Network ; September 2015".
+#     It publishes no testnet toml and no testnet endpoints.
+#   - GET https://anchor.zeam.money/auth?account=G… returned a SEP-10 challenge
+#     whose network_passphrase is the public network one, so a testnet account
+#     cannot authenticate and a testnet payment cannot go through this lane.
+#   - Zeam does run a sandbox, but for its own API Gateway, not for SEP-31:
+#     https://docs.zeam.money/access/sandbox says it shares the production base
+#     URL https://api.zeam.money/gw/v1 and is entered with sandbox credentials
+#     from an application registered in the Zeam business portal by a business
+#     "association". Access is requested at developers@zeam.money
+#     (https://docs.zeam.money/resources/support). The same page warns that only
+#     sender MSISDNs ending 111/000 are simulated and others may attempt a real
+#     payout, so it is not a no-real-funds environment by default.
+#   - This repo has no Zeam business portal account and no business
+#     relationship, and no access request has been sent from it yet.
+#   Outcome: not attempted. No testnet payment is possible through the SEP-31
+#   lane, the Gateway sandbox needs business onboarding this repo does not
+#   have, and no real funds were used.
 id: zeam
-status_note: "REAL — Zeam (mint.zeam.money), probed 2026-10-17: SEP-10/12/31/38 all answer. No payment attempted, no business relationship in place."
+status_note: "REAL — Zeam (mint.zeam.money), probed 2026-10-17: SEP-10/12/31/38 all answer. Testnet/sandbox payment checked 2026-11-24: not possible — toml and SEP-10 are public-network only; Zeam's sandbox is for its API Gateway and needs a business-portal account this repo does not have. No payment attempted."
 
 source:
   name: USD Sending Anchor

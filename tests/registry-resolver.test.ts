@@ -143,6 +143,17 @@ describe("RegistryRouteResolver", () => {
     await expect(r.resolve(INTENT, CORRIDOR)).rejects.toThrow(UnattestedAnchorError);
   });
 
+  it("refuses a never-attested domain as not attested, not as an outage", async () => {
+    const notFound = async (): Promise<never> => {
+      throw new Error("HostError: Error(Contract, #6)");
+    };
+    const r = resolver(source({ servesSep31: notFound, staleness: notFound }));
+    await expect(r.resolve(INTENT, CORRIDOR)).rejects.toThrow(UnattestedAnchorError);
+    await expect(r.resolve(INTENT, CORRIDOR)).rejects.toThrow(
+      /not attested as serving SEP-31/,
+    );
+  });
+
   it("names the domain it refused, so an operator knows what to fix", async () => {
     const r = resolver(source({ servesSep31: async () => false }));
     await expect(r.resolve(INTENT, CORRIDOR)).rejects.toThrow(

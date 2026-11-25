@@ -25,6 +25,17 @@ export { type SettlementRef, settlementId };
 export { Sep10Client, jwtExpiryMs, type Sep10Signer } from "./sep10";
 export { Sep12ComplianceCheck, type Sep12ComplianceCheckOptions } from "./sep12";
 export type { ComplianceMethod };
+export {
+  createExporterRegistry,
+  type BusinessAddress,
+  type BusinessContact,
+  type BusinessProfile,
+  type ExporterError,
+  type ExporterErrorCode,
+  type ExporterRegistry,
+  type OnboardingExporter,
+  type ReceiverForm,
+} from "./onboarding";
 
 /** A SEP-38 quote. `firm` quotes carry an id + expiry and bind the deliverer to a rate. */
 export interface Quote {

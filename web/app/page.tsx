@@ -4,9 +4,12 @@ import { Button } from "@/components/ui/Button";
 import { CorridorCard } from "@/components/CorridorCard";
 import { LivenessLegend } from "@/components/LivenessLegend";
 import { AnchorCard } from "@/components/AnchorCard";
+import { NetworkSwitch } from "@/components/NetworkSwitch";
+import { NoRegistry } from "@/components/NoRegistry";
 import { RegistryFreshness } from "@/components/RegistryFreshness";
 import { corridors, liveness } from "@/lib/corridors";
-import { fetchAttestations, REGISTRY_ID, REGISTRY_NETWORK } from "@/lib/registry";
+import { NETWORK_LABEL, type NetworkId } from "@/lib/network";
+import { fetchAttestations, registryId, REGISTRY_NETWORK } from "@/lib/registry";
 
 // Anchor facts are read from the chain at request time, not baked in at build.
 // Revalidate hourly: attestations change on the order of hours, and a page that
@@ -14,8 +17,15 @@ import { fetchAttestations, REGISTRY_ID, REGISTRY_NETWORK } from "@/lib/registry
 // habit this project is correcting.
 export const revalidate = 3600;
 
+type Snapshot = Awaited<ReturnType<typeof fetchAttestations>>;
+
 export default async function Home() {
-  const attestations = await fetchAttestations();
+  // Both networks are read here, so the cached page already holds each of them and the switch
+  // only chooses which to show. A network with no registry costs nothing: nothing is called.
+  const [testnet, mainnet] = await Promise.all([
+    fetchAttestations("testnet"),
+    fetchAttestations("public"),
+  ]);
   const verifiedCount = corridors.filter((c) => {
     const state = liveness(c).state;
     return state === "verified" || state === "proven";
@@ -77,57 +87,25 @@ export default async function Home() {
 
       {/* Anchors — read from the on-chain registry */}
       <section className="flex flex-col gap-5">
-        <div className="flex items-end justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-semibold">Attested anchors</h2>
-            <p className="max-w-2xl text-secondary-text">
-              Read from the on-chain registry; each card shows the attestation ledger and how long
-              ago that was. Each card separates what an anchor&apos;s{" "}
-              <code className="rounded bg-bg-subtle px-1 py-0.5 text-xs">stellar.toml</code>{" "}
-              <em>advertises</em> from what actually <em>worked</em> when it was probed — because
-              those are different claims, and treating them as one is how a lane that does not
-              exist comes to look healthy.
-            </p>
-            {attestations.ok && (
-              <div className="mt-2">
-                <RegistryFreshness
-                  network={REGISTRY_NETWORK}
-                  readAt={attestations.readAt}
-                  latestLedger={attestations.latestLedger}
-                  revalidateSeconds={revalidate}
-                />
-              </div>
-            )}
-          </div>
-          {REGISTRY_ID && (
-            <a
-              href={`https://stellar.expert/explorer/${REGISTRY_NETWORK}/contract/${REGISTRY_ID}`}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text hover:underline"
-            >
-              <Link2 size={13} className="text-blue-600" /> verify on chain
-              <span className="sr-only"> (opens in a new tab)</span>
-            </a>
-          )}
+        <div>
+          <h2 className="text-2xl font-semibold">Attested anchors</h2>
+          <p className="max-w-2xl text-secondary-text">
+            Read from the on-chain registry of the network chosen below; each card names that
+            network and shows the attestation ledger and how long ago that was. Each card
+            separates what an anchor&apos;s{" "}
+            <code className="rounded bg-bg-subtle px-1 py-0.5 text-xs">stellar.toml</code>{" "}
+            <em>advertises</em> from what actually <em>worked</em> when it was probed — because
+            those are different claims, and treating them as one is how a lane that does not
+            exist comes to look healthy.
+          </p>
         </div>
-
-        {!attestations.ok ? (
-          <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
-            Could not reach the registry ({attestations.error}). No anchor data is shown rather
-            than stale or assumed data.
-          </div>
-        ) : attestations.anchors.length === 0 ? (
-          <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
-            No anchors have been attested yet.
-          </div>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {attestations.anchors.map((a) => (
-              <AnchorCard key={a.domain} anchor={a} />
-            ))}
-          </div>
-        )}
+        <NetworkSwitch
+          fallback={REGISTRY_NETWORK}
+          panels={{
+            testnet: <AnchorPanel network="testnet" snapshot={testnet} />,
+            public: <AnchorPanel network="public" snapshot={mainnet} />,
+          }}
+        />
       </section>
 
       {/* Corridors */}
@@ -155,6 +133,63 @@ export default async function Home() {
           ))}
         </div>
       </section>
+    </div>
+  );
+}
+
+/**
+ * One network's anchors, or the reason there are none. The three empty answers are kept
+ * apart on purpose: "there is no registry here", "the registry could not be read" and "the
+ * registry is empty" are different facts, and only the last two say anything about anchors.
+ */
+function AnchorPanel({ network, snapshot }: { network: NetworkId; snapshot: Snapshot }) {
+  const label = NETWORK_LABEL[network];
+  const id = registryId(network);
+
+  if (!snapshot.deployed) return <NoRegistry network={network} />;
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {snapshot.ok ? (
+          <RegistryFreshness
+            network={label.toLowerCase()}
+            readAt={snapshot.readAt}
+            latestLedger={snapshot.latestLedger}
+            revalidateSeconds={revalidate}
+          />
+        ) : (
+          <span />
+        )}
+        {id && (
+          <a
+            href={`https://stellar.expert/explorer/${network}/contract/${id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text hover:underline"
+          >
+            <Link2 size={13} className="text-blue-600" /> verify on chain
+            <span className="sr-only"> (opens in a new tab)</span>
+          </a>
+        )}
+      </div>
+
+      {!snapshot.ok ? (
+        <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
+          Could not reach the {label} registry ({snapshot.error}). No anchor data is shown
+          rather than stale or assumed data.
+        </div>
+      ) : snapshot.anchors.length === 0 ? (
+        <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
+          No anchors have been attested on {label} yet.
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {snapshot.anchors.map((a) => (
+            <AnchorCard key={a.domain} anchor={a} network={network} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

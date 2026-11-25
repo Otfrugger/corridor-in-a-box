@@ -3,6 +3,16 @@
 
 const BASE = "https://stellar.expert/explorer";
 
+/** A link to a transaction, such as a payment's settlement. */
+export function txUrl(network: string, hash: string): string {
+  return `${BASE}/${network}/tx/${hash}`;
+}
+
+/** Stellar transaction hashes are 32 bytes of hex; mock settlements use other ids. */
+export function isTxHash(value: string): boolean {
+  return /^[0-9a-f]{64}$/i.test(value);
+}
+
 /** A link to the ledger an attestation was recorded in. */
 export function ledgerUrl(network: string, ledger: number): string {
   return `${BASE}/${network}/ledger/${ledger}`;

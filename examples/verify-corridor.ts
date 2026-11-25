@@ -27,6 +27,8 @@
 //   HORIZON_URL=...               default https://horizon-testnet.stellar.org
 //   MANIFEST=...                  default corridors/reference.corridor.yaml
 //   AMOUNT=...                    default 10.00
+//   EXPECT_STATE=...               require a terminal state other than `completed`
+//                                 (for fault scenarios; see docs/operations.md)
 //   SKIP_DOCTOR=1                 skip the preflight (stack managed elsewhere)
 
 import { fileURLToPath } from "node:url";
@@ -189,15 +191,38 @@ async function main(): Promise<void> {
     );
   }
 
+  // A fault scenario (docs/operations.md) expects a run that does NOT complete:
+  // the point is the engine's reaction to a misbehaving anchor, so the terminal
+  // state is the assertion rather than `completed`.
+  const expected = process.env.EXPECT_STATE;
+  const terminal = stored?.state;
+  const expectedReached = expected !== undefined && expected !== "" && terminal === expected;
+
   if (!result.ok) {
     console.error(`\n✗ ${result.error.code} — ${result.error.message}`);
-    console.error(`  terminal state: ${stored?.state ?? "unknown"}`);
+    console.error(`  terminal state: ${terminal ?? "unknown"}`);
+    if (expectedReached) {
+      console.log(`\n✓ terminal state is "${expected}", as the fault scenario expects`);
+      return;
+    }
     process.exit(EXIT_NOT_COMPLETED);
   }
 
   if (result.value.state !== "completed") {
+    if (expectedReached) {
+      console.log(
+        `\n✓ terminal state is "${expected}", as the fault scenario expects` +
+          (stored?.lastError ? `\n  last error: ${stored.lastError}` : ""),
+      );
+      return;
+    }
     console.error(`\n✗ terminal state is "${result.value.state}", not "completed"`);
     if (stored?.lastError) console.error(`  last error: ${stored.lastError}`);
+    process.exit(EXIT_NOT_COMPLETED);
+  }
+
+  if (expected !== undefined && expected !== "") {
+    console.error(`\n✗ expected terminal state "${expected}", but the run completed`);
     process.exit(EXIT_NOT_COMPLETED);
   }
 

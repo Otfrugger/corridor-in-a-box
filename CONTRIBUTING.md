@@ -218,6 +218,7 @@ under ~72 characters and explain the _why_ in the body.
 - Add `*.corridor.yaml` manifests for live SEP-31 or SEP-6 anchors (SEP-24's interactive flow is out of scope, see `docs/protocols/sep24.md`) and add corresponding `plan` verification tests.
 - Extend the conformance suite in `packages/adapter-kit` with additional probes for anchor SEP conformance.
 - Add and expand conformance and integration test coverage across corridor lifecycle states and error paths.
+- Add an onboarding exporter for a receiver, mapping the business onboarding profile onto that receiver's form (see [`docs/onboarding-exporters.md`](./docs/onboarding-exporters.md)).
 - Widen the SEP-31 status mapping in `packages/sep31` as you hit real anchors that report statuses we don't yet classify (see `mapSep31Status`).
 
 ## Keeping docs in sync

@@ -69,7 +69,14 @@ export type CorridorErrorCode =
    * e.g. an unattested anchor. Fail closed: nothing was sent, a fresh run is
    * persisted as `failed`, and the key is spent. Not retryable.
    */
-  | "ROUTE_REFUSED";
+  | "ROUTE_REFUSED"
+  /**
+   * Service-level, never raised by the engine: the signed `routeOption` on
+   * `POST /payments` failed verification (bad or missing signature, expired,
+   * not matching the payment, or no `routeOptionSecret` configured). Nothing
+   * was started; the response's `reason` says which check failed.
+   */
+  | "ROUTE_OPTION_INVALID";
 
 /**
  * Returns true if the error code is a pre-settle gate check refusal.
@@ -180,6 +187,22 @@ export interface PaymentIntent {
    * goes to the anchor through SEP-12, never through here.
    */
   readonly destinationFields?: Readonly<Record<string, string>>;
+  /**
+   * Recipient Stellar wallet instructions when routing directly to a wallet
+   * (`dest.protocol === "wallet"`): the destination `G...` account and optional
+   * transaction memo supplied by the caller at payment time.
+   */
+  readonly wallet?: WalletDestination;
+}
+
+/** Per-payment Stellar wallet destination supplied on a `protocol: wallet` intent. */
+export interface WalletDestination {
+  /** Recipient Stellar public key (`G...`). */
+  readonly account: string;
+  /** Optional transaction memo attached to the on-chain payment. */
+  readonly memo?: string;
+  /** Stellar memo encoding when `memo` is present. Defaults to `"text"` when omitted. */
+  readonly memoType?: "text" | "hash" | "id";
 }
 
 // --- Settlement references ----------------------------------------------

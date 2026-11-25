@@ -9,6 +9,7 @@ import { corridors, getCorridor, liveness, VERBS } from "@/lib/corridors";
 import type { EngineDemoResult, PaymentScenario } from "@/lib/engine-demo";
 import generatedStates from "@/lib/generated/states.json";
 import { STEP_STATUS_TEXT, announceRun, stepStatus } from "@/lib/run-status";
+import { PaymentTimeline } from "@/components/PaymentTimeline";
 
 type CorridorState = EngineDemoResult["state"];
 
@@ -26,6 +27,16 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
   const [running, setRunning] = useState(false);
   const [reached, setReached] = useState<CorridorState[]>([]);
   const [result, setResult] = useState<EngineDemoResult | null>(null);
+  // The run the progress timeline polls. It is watched from submission, so the
+  // steps advance while the POST is still executing; the POST's trail and outcome
+  // are added when it returns. `run` remounts the timeline for each new run.
+  const [watched, setWatched] = useState<{
+    key: string;
+    run: number;
+    submitting: boolean;
+    trail?: CorridorState[];
+    result?: { state: string; stellarTxHash?: string; error?: string };
+  } | null>(null);
   // The amount the last run was sent with, so the field is only marked invalid
   // while it still holds the value the engine refused.
   const [submittedAmount, setSubmittedAmount] = useState<string | null>(null);
@@ -50,10 +61,15 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
     setResult(null);
     setReached([]);
     setSubmittedAmount(amount);
+    setWatched((prev) => ({ key: idemKey, run: (prev?.run ?? 0) + 1, submitting: true }));
 
     // try/finally: without it, a network error or a non-JSON response threw out
     // of this function with `running` still true — spinner stuck forever, Run
     // button permanently disabled, only a page reload recovers.
+    // `answered`: the server replied with an error body past request validation
+    // (400), so the engine may have stored the run (a proxied service failure); the
+    // timeline polls once more and hides itself if the run does not exist.
+    let answered = false;
     try {
       const res = await fetch("/api/payments", {
         method: "POST",
@@ -79,8 +95,23 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
           (outcome as unknown as { message?: string; error?: string })?.message ??
           (outcome as unknown as { error?: string })?.error ??
           `request failed (HTTP ${res.status})`;
+        answered = res.status !== 400;
         throw new Error(message);
       }
+      setWatched((prev) =>
+        prev && outcome.trail.length
+          ? {
+              ...prev,
+              submitting: false,
+              trail: [...outcome.trail],
+              result: {
+                state: outcome.state,
+                stellarTxHash: outcome.stellarTxHash,
+                error: outcome.error?.code,
+              },
+            }
+          : null,
+      );
 
       // Animate the trail one state at a time.
       for (const state of outcome.trail) {
@@ -89,6 +120,7 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
       }
       setResult(outcome);
     } catch (e) {
+      setWatched((prev) => (answered && prev ? { ...prev, submitting: false } : null));
       setResult({
         ok: false,
         state: "failed",
@@ -107,6 +139,7 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
     setResult(null);
     setReached([]);
     setSubmittedAmount(null);
+    setWatched(null);
   }
 
   const corridor = getCorridor(corridorId)!;
@@ -237,6 +270,17 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
         </div>
       </Card>
 
+      <div className="flex flex-col gap-6">
+      {watched && (
+        <PaymentTimeline
+          key={watched.run}
+          idempotencyKey={watched.key}
+          submitting={watched.submitting}
+          trail={watched.trail}
+          result={watched.result}
+        />
+      )}
+
       {/* Trail */}
       <Card className="flex flex-col gap-4">
         <div className="flex items-center justify-between">
@@ -331,6 +375,7 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
           </div>
         )}
       </Card>
+      </div>
     </div>
   );
 }

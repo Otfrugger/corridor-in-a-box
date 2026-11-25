@@ -2,14 +2,12 @@ import { CircleCheck, CircleSlash, CircleHelp, Clock, ExternalLink } from "lucid
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { CopyButton } from "@/components/CopyButton";
-import {
-  PROBE_NAMES,
-  REGISTRY_NETWORK,
-  STALE_AFTER_LEDGERS,
-  type AnchorAttestation,
-} from "@/lib/registry";
+import { NetworkBadge } from "@/components/NetworkBadge";
+import { PROBE_NAMES, STALE_AFTER_LEDGERS, type AnchorAttestation } from "@/lib/registry";
 import { approxLedgerDuration } from "@/lib/freshness";
+import { anchorCardCopy } from "@/lib/anchor-card-copy";
 import { addressUrl, ledgerUrl, shortAddress } from "@/lib/explorer";
+import type { NetworkId } from "@/lib/network";
 
 /**
  * One attested anchor.
@@ -18,34 +16,48 @@ import { addressUrl, ledgerUrl, shortAddress } from "@/lib/explorer";
  * merge: what the anchor's stellar.toml ADVERTISES, and what actually WORKED
  * when someone called it. Showing only the first is what made a corridor
  * pointing at a non-existent domain look healthy.
+ *
+ * `network` is the registry the attestation was read from. The card says so, and
+ * its ledger and attester links go to that network's explorer: the same domain can
+ * be attested on testnet and on mainnet, and those are different facts.
  */
-export function AnchorCard({ anchor }: { anchor: AnchorAttestation }) {
+export function AnchorCard({
+  anchor,
+  network,
+}: {
+  anchor: AnchorAttestation;
+  network: NetworkId;
+}) {
   const stale = anchor.staleness > STALE_AFTER_LEDGERS;
-  // Green requires the capability to be advertised AND probed green AND fresh.
-  const usable = anchor.servesSep31 && !stale;
+  const copy = anchorCardCopy(anchor, stale);
 
   return (
     <Card className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate font-mono text-sm font-semibold">{anchor.domain}</h3>
-          <div className="mt-1 text-sm text-secondary-text">
-            {anchor.seps.length ? anchor.seps.map((n) => `SEP-${n}`).join(" · ") : "no SEP endpoints"}
-          </div>
+          <div className="mt-1 text-sm text-secondary-text">{copy.sepsLabel}</div>
         </div>
-        {usable ? (
-          <Badge variant="success">
-            <CircleCheck size={12} /> serves SEP-31
-          </Badge>
-        ) : anchor.servesSep31 ? (
-          <Badge variant="warning">
-            <Clock size={12} /> stale
-          </Badge>
-        ) : (
-          <Badge variant="default">
-            <CircleSlash size={12} /> no SEP-31
-          </Badge>
-        )}
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          {copy.badge === "serves-sep31" ? (
+            <Badge variant="success">
+              <CircleCheck size={12} /> serves SEP-31
+            </Badge>
+          ) : copy.badge === "stale" ? (
+            <Badge variant="warning">
+              <Clock size={12} /> stale
+            </Badge>
+          ) : copy.badge === "unreachable" ? (
+            <Badge variant="default">
+              <CircleHelp size={12} /> stellar.toml unreachable
+            </Badge>
+          ) : (
+            <Badge variant="default">
+              <CircleSlash size={12} /> no SEP-31
+            </Badge>
+          )}
+          <NetworkBadge network={network} />
+        </div>
       </div>
 
       {/* Per-probe results. A probe that was never run is rendered differently
@@ -81,7 +93,7 @@ export function AnchorCard({ anchor }: { anchor: AnchorAttestation }) {
         <div>
           attested at ledger{" "}
           <a
-            href={ledgerUrl(REGISTRY_NETWORK, anchor.attestedLedger)}
+            href={ledgerUrl(network, anchor.attestedLedger)}
             target="_blank"
             rel="noreferrer"
             aria-label={`Ledger ${anchor.attestedLedger} on stellar.expert (opens in a new tab)`}
@@ -97,7 +109,7 @@ export function AnchorCard({ anchor }: { anchor: AnchorAttestation }) {
         <div className="flex items-center gap-1">
           attested by{" "}
           <a
-            href={addressUrl(REGISTRY_NETWORK, anchor.attester)}
+            href={addressUrl(network, anchor.attester)}
             target="_blank"
             rel="noreferrer"
             title={anchor.attester}
@@ -110,10 +122,16 @@ export function AnchorCard({ anchor }: { anchor: AnchorAttestation }) {
         </div>
         <div className="flex min-w-0 items-center gap-1">
           <span className="shrink-0">toml sha256</span>
-          <span className="truncate font-mono" title={anchor.tomlHash}>
-            {anchor.tomlHash}
-          </span>
-          <CopyButton value={anchor.tomlHash} label="toml sha256" />
+          {copy.tomlHash ? (
+            <>
+              <span className="truncate font-mono" title={copy.tomlHash}>
+                {copy.tomlHash}
+              </span>
+              <CopyButton value={copy.tomlHash} label="toml sha256" />
+            </>
+          ) : (
+            <span className="font-mono text-secondary-text" title="stellar.toml was never fetched">—</span>
+          )}
         </div>
       </div>
     </Card>

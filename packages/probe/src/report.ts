@@ -1,4 +1,5 @@
 import {
+  classifyTomlFetchError,
   decodeProbes,
   decodeSeps,
   probeAnchor,
@@ -8,6 +9,7 @@ import {
   type ProbeOutcome,
   type ProbeResult,
   type SepNumber,
+  type TomlFailureReason,
 } from "./index";
 
 export interface SweepReportEntry {
@@ -22,6 +24,7 @@ export interface SweepReportEntry {
   readonly usableSep31OffRamp: "yes" | "no";
   readonly tomlHash: string;
   readonly outcomes: readonly ProbeOutcome[];
+  readonly tomlFailureReason?: TomlFailureReason;
   readonly raw: {
     readonly seps: number;
     readonly probesRun: number;
@@ -90,6 +93,7 @@ export function buildSweepReportEntry(
     usableSep31OffRamp: usable ? "yes" : "no",
     tomlHash: result.tomlHash,
     outcomes: result.outcomes,
+    ...(result.tomlFailureReason ? { tomlFailureReason: result.tomlFailureReason } : {}),
     raw: {
       seps: result.seps,
       probesRun: result.probesRun,
@@ -256,6 +260,7 @@ export async function sweepAnchors(
         res = await probeFn(domain);
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
+        const tomlFailureReason = classifyTomlFetchError(e);
         res = {
           domain,
           seps: 0,
@@ -263,6 +268,7 @@ export async function sweepAnchors(
           probesPassed: 0,
           tomlHash: ZERO_HASH,
           outcomes: [{ probe: "toml_fetch", passed: false, detail }],
+          ...(tomlFailureReason ? { tomlFailureReason } : {}),
         };
       }
       results[idx] = res;

@@ -136,11 +136,100 @@ export interface RegistryResolverOptions {
 
 const WEEK_OF_LEDGERS = 120_960;
 
+/**
+ * How a Soroban client surfaces the registry contract's `NotFound` (code 6),
+ * the same match `contractErrorCode` in @corridor/registry makes. Matched
+ * here rather than imported so this package stays free of the Soroban SDK.
+ */
+const CONTRACT_NOT_FOUND = /Error\(Contract, #6\)/;
+
 /** How a protocol is written when a refusal names it. */
 function protocolLabel(protocol: string): string {
   if (protocol === "sep31") return "SEP-31";
   if (protocol === "sep6") return "SEP-6";
   return protocol;
+}
+
+/** Why an attestation check refused a domain. */
+export type AttestationRefusal =
+  "protocol not attestable" | "registry unreachable" | "not attested" | "stale attestation";
+
+/** The result of {@link checkAttestation}: either evidence, or the refusal and an operator-facing detail. */
+export type AttestationCheck =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: AttestationRefusal; readonly detail: string };
+
+/**
+ * Does the registry hold fresh evidence that `domain` serves `protocol`?
+ *
+ * The one place the gate's rules live, shared by RegistryRouteResolver and
+ * filterByEvidence. It never throws: a registry that cannot be read is a
+ * refusal (`registry unreachable`), because "we do not know" must never
+ * resolve to "proceed".
+ */
+export async function checkAttestation(
+  registry: AttestationSource,
+  domain: string,
+  protocol: string,
+  maxStalenessLedgers: number = WEEK_OF_LEDGERS,
+): Promise<AttestationCheck> {
+  // A bespoke lane has no on-chain probe: the registry attests SEP-31 and
+  // SEP-6 receive-side behaviour, and there is no evidence to gather about a
+  // `custom:<id>` API. The gate refuses rather than treating the manifest's
+  // own claim as proof, and the message says which protocol is the problem so
+  // the operator knows whether to re-attest or to use the allowlist.
+  if (!isAttestedProtocol(protocol)) {
+    return {
+      ok: false,
+      reason: "protocol not attestable",
+      detail:
+        `protocol ${protocol} has no on-chain attestation probe — the registry can only ` +
+        `attest SEP-31 and SEP-6 receive-side. Add ${domain} to allowUnattestedDomains ` +
+        `if this lane is deliberately exempt.`,
+    };
+  }
+
+  const notAttested: AttestationCheck = {
+    ok: false,
+    reason: "not attested",
+    detail:
+      `not attested as serving ${protocolLabel(protocol)} receive-side. Advertising ` +
+      `${protocolLabel(protocol)} in a stellar.toml is not sufficient — the ` +
+      `${protocolLabel(protocol)} probe must also pass.`,
+  };
+
+  let serves: boolean;
+  let staleness: number;
+  try {
+    [serves, staleness] = await Promise.all([
+      registry.serves(domain, protocol),
+      registry.staleness(domain),
+    ]);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    // The registry contract answers NotFound for a domain it has never
+    // attested. That is a healthy registry saying "no evidence", not an outage.
+    if (CONTRACT_NOT_FOUND.test(message)) return notAttested;
+    // Fail CLOSED. An unreachable registry means we do not know whether this
+    // anchor works, and "we do not know" must never resolve to "proceed".
+    return {
+      ok: false,
+      reason: "registry unreachable",
+      detail: `registry lookup failed (${message})`,
+    };
+  }
+
+  if (!serves) return notAttested;
+  if (staleness > maxStalenessLedgers) {
+    return {
+      ok: false,
+      reason: "stale attestation",
+      detail:
+        `last attested ${staleness} ledgers ago, older than the ${maxStalenessLedgers} ` +
+        `ledger limit. Re-attest before routing value through it.`,
+    };
+  }
+  return { ok: true };
 }
 
 export class RegistryRouteResolver implements RouteResolver {
@@ -164,55 +253,8 @@ export class RegistryRouteResolver implements RouteResolver {
       return { receiving: this.adapterFor(corridor), trust: "attested" };
     }
 
-    // A bespoke lane has no on-chain probe: the registry attests SEP-31 and
-    // SEP-6 receive-side behaviour, and there is no evidence to gather about a
-    // `custom:<id>` API. The gate refuses rather than treating the manifest's
-    // own claim as proof, and the message says which protocol is the problem so
-    // the operator knows whether to re-attest or to use the allowlist.
-    if (!isAttestedProtocol(protocol)) {
-      throw new UnattestedAnchorError(
-        domain,
-        `protocol ${protocol} has no on-chain attestation probe — the registry can only ` +
-          `attest SEP-31 and SEP-6 receive-side. Add ${domain} to allowUnattestedDomains ` +
-          `if this lane is deliberately exempt.`,
-        protocol,
-      );
-    }
-
-    let serves: boolean;
-    let staleness: number;
-    try {
-      [serves, staleness] = await Promise.all([
-        this.registry.serves(domain, protocol),
-        this.registry.staleness(domain),
-      ]);
-    } catch (cause) {
-      // Fail CLOSED. An unreachable registry means we do not know whether this
-      // anchor works, and "we do not know" must never resolve to "proceed".
-      throw new UnattestedAnchorError(
-        domain,
-        `registry lookup failed (${cause instanceof Error ? cause.message : String(cause)})`,
-        protocol,
-      );
-    }
-
-    if (!serves) {
-      throw new UnattestedAnchorError(
-        domain,
-        `not attested as serving ${protocolLabel(protocol)} receive-side. Advertising ` +
-          `${protocolLabel(protocol)} in a stellar.toml is not sufficient — the ` +
-          `${protocolLabel(protocol)} probe must also pass.`,
-        protocol,
-      );
-    }
-    if (staleness > this.maxStaleness) {
-      throw new UnattestedAnchorError(
-        domain,
-        `last attested ${staleness} ledgers ago, older than the ${this.maxStaleness} ` +
-          `ledger limit. Re-attest before routing value through it.`,
-        protocol,
-      );
-    }
+    const check = await checkAttestation(this.registry, domain, protocol, this.maxStaleness);
+    if (!check.ok) throw new UnattestedAnchorError(domain, check.detail, protocol);
 
     return { receiving: this.adapterFor(corridor), trust: "attested" };
   }

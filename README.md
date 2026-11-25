@@ -34,6 +34,11 @@ Everything in this repo is publishable as-is.
 > optional, separate on-chain oracle for publishing corridor data — never as part
 > of moving money.
 
+**Custody.** The project never holds your funds, or a key that can move them. Each
+business runs the engine against its own account with its own signer. Who holds the
+money at each step, and what the project does and does not do, is in
+[docs/custody.md](./docs/custody.md).
+
 ## Quickstart
 
 ```bash
@@ -42,6 +47,7 @@ pnpm lint               # eslint + prettier
 pnpm typecheck          # whole monorepo, one tsc pass
 pnpm test               # vitest: engine, manifest, money, sep31, stellar, …
 pnpm example            # run a payment end-to-end (mocked anchor + settle)
+pnpm example:plan-and-pay   # quote three mock anchors, rank them, pay the best one
 pnpm mock:anchor        # scriptable local SEP-1/10/12/31/38 anchor (stall, KYC reject, refund, …): the quickest full corridor
 pnpm cli plan corridors/reference.corridor.yaml   # offline pre-flight / liveness check
 CORRIDOR_SIGNER_SECRET=S… pnpm cli canary corridors/reference.corridor.yaml \
@@ -245,6 +251,11 @@ listing, and the country the anchor **declared** in its own
 itself, verified by nobody. Both are written by a separate `attest_meta` call,
 under their own storage key and their own cooldown, so an attester already in the
 field keeps working and a sweep can write both halves in one ledger.
+
+The receive list is written once more with the `min_amount` and `max_amount` the
+anchor stated beside each asset (`attest_receive`, read back with `get_receive`),
+so a planner can rule a lane out by amount without calling the anchor. A bound the
+anchor did not state is absent, never zero.
 
 The two lines above read `not recorded` and `no country declared` because that
 record was written before the metadata existed. That is the case the design has
@@ -467,6 +478,16 @@ real](#proof-the-settle-leg-is-real) above (ledger 4024693). `reconcile →
 completed` was proven against the reference anchor on 2026-11-16 (see the update
 in [Proof against a real SEP-31 anchor](#proof-against-a-real-sep-31-anchor)),
 which closes Phase 1. No payment has moved through a third-party anchor yet.
+
+## Fork the send app
+
+The `web/` app is a complete send starter: a sender picks a corridor, sends
+testnet funds and watches the payment arrive, state by state. To copy and
+rebrand it, read [the send-app fork guide](./docs/send-app-fork-guide.md) — it
+covers what to change, how to point the app at a real `@corridor/service`, and
+the two things a fork cannot copy: **your own money-transmission licence and
+your own KMS-backed signing key**. The app is testnet only; real money is your
+licence and your key, not this repo's.
 
 ## License
 

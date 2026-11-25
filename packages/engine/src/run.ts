@@ -17,12 +17,14 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteDecision, RouteResolver } from "@corridor/router";
+import { routeChoiceFor } from "./route-choice";
 import {
   AdapterQuoteProvider,
   ExternalQuoteProvider,
   toLegacy,
   type ExternalQuoteFn,
   type OpenTransaction,
+  type Quote,
   type QuoteProvider,
 } from "@corridor/adapter-kit";
 import { canTransition, isTerminal, type CorridorState } from "./state";
@@ -73,6 +75,7 @@ import {
   type Logger,
   type Metrics,
   type RequestScope,
+  type RouteChoice,
 } from "./observability";
 import type { CheckResult, GateContext, PreSettleGate } from "./gate";
 import {
@@ -188,6 +191,13 @@ export interface ExecuteOptions {
    * on-chain attestation.
    */
   trustManifestWithoutAttestation?: boolean;
+  /**
+   * Pre-obtained caller quote (e.g. a locked option presented to the sender).
+   * When present, the engine honours it instead of fetching a fresh quote, and
+   * refuses an expired firm quote (`QUOTE_EXPIRED`) rather than re-quoting at
+   * a different rate.
+   */
+  quote?: Quote;
   /**
    * Run quote → comply → open → pre-settle gate against the real anchor, then
    * stop before `settling`: `SettlementSubmitter.submit()` (and `findExisting`)
@@ -494,9 +504,15 @@ export async function execute(
     pollMs,
     adapter,
     routeTrust,
+    routeDecision: route,
     recordOutcome,
   });
   const { advance, die, finishFailure } = context;
+
+  // Pin the resolved anchor domain and protocol on the run record (#624) so
+  // restarts and readers agree on which route was chosen.
+  run.receivingDomain = corridor.dest.endpoints.home_domain;
+  run.routeProtocol = corridor.dest.protocol;
 
   const strategies = deps.strategies ?? defaultStrategies(deps.submitter, adapter);
   const caps = adapter.capabilities();
@@ -562,11 +578,14 @@ export async function execute(
   }
 
   // --- 1. quote ---------------------------------------------------------
-  const q = await timed("quote", () => quote(adapter, intent, corridor, now(), provider));
+  const q = await timed("quote", () =>
+    quote(adapter, intent, corridor, now(), provider, opts.quote),
+  );
   if (!q.ok) return die(q.error);
   run.quoteId = q.value.id;
   run.quoteExpiresAt = q.value.expiresAt;
   run.quoteFirm = q.value.firm;
+  run.priceLabel = q.value.firm ? "locked" : "indicative";
   run.settlementAmount = q.value.sourceAmount.amount;
   {
     const t = await advance("quoted");
@@ -952,6 +971,8 @@ interface AdvanceMeta {
   amountRefunded?: string;
   amountFee?: string;
   checks?: readonly CheckResult[];
+  /** Set by `advance` itself on the first transition out of `created`. */
+  route?: RouteChoice;
 }
 
 interface RunContext {
@@ -985,6 +1006,13 @@ interface RunContextInit {
   /** Receiving-anchor adapter, used to watch an anchor-driven refund. */
   adapter: AnchorAdapter;
   routeTrust?: "attested" | "manifest";
+  /**
+   * The route decision whose choice is recorded once, on the run's first
+   * transition out of `created` (a resumed run that already left `created`
+   * never re-records it). Turned into a `RouteChoice` at that moment, so the
+   * chosen option can fall back to the run's own quote label.
+   */
+  routeDecision?: RouteDecision;
   /** Reports a resolved run to the circuit breaker (no-op without `deps.health`). */
   recordOutcome: RecordOutcome;
 }
@@ -1005,6 +1033,7 @@ function createRunContext(init: RunContextInit): RunContext {
     pollMs,
     adapter,
     routeTrust,
+    routeDecision,
     recordOutcome,
   } = init;
 
@@ -1021,6 +1050,9 @@ function createRunContext(init: RunContextInit): RunContext {
     if (to === "verifying") gateChecks = meta?.checks;
     else if (from === "verifying" && gateChecks && !meta?.checks) {
       meta = { ...meta, checks: gateChecks };
+    }
+    if (from === "created" && routeDecision) {
+      meta = { ...meta, route: routeChoiceFor(routeDecision, run.priceLabel) };
     }
     run.state = to;
     run.version += 1;
@@ -1174,13 +1206,18 @@ async function failRun(
   init: Pick<
     RunContextInit,
     "run" | "trail" | "deps" | "store" | "now" | "routeTrust" | "recordOutcome"
-  >,
+  > &
+    Partial<Pick<RunContextInit, "routeDecision">>,
   error: CorridorError,
   checks?: readonly CheckResult[],
 ): Promise<Err> {
-  const { run, trail, deps, store, now, routeTrust, recordOutcome } = init;
+  const { run, trail, deps, store, now, routeTrust, routeDecision, recordOutcome } = init;
   if (!canTransition(run.state, "failed")) return { ok: false, error };
   const from = run.state;
+  const route =
+    from === "created" && routeDecision
+      ? routeChoiceFor(routeDecision, run.priceLabel)
+      : undefined;
   run.lastError = `${error.code}: ${error.message}`;
   run.state = "failed";
   run.version += 1;
@@ -1193,7 +1230,7 @@ async function failRun(
     now(),
     run.lastError,
     routeTrust,
-    checks ? { checks } : undefined,
+    checks || route ? { ...(checks && { checks }), ...(route && { route }) } : undefined,
   );
   await recordOutcome("failed", error);
   return { ok: false, error };
@@ -1270,6 +1307,7 @@ async function emitTransition(
     amountRefunded?: string;
     amountFee?: string;
     checks?: readonly CheckResult[];
+    route?: RouteChoice;
   },
 ): Promise<void> {
   const entry: AuditEntry = {
@@ -1287,6 +1325,7 @@ async function emitTransition(
     ...(meta?.amountFee !== undefined && { amountFee: meta.amountFee }),
     // A copy, so a caller mutating its array afterwards cannot change what was recorded.
     ...(meta?.checks && meta.checks.length > 0 && { checks: [...meta.checks] }),
+    ...(meta?.route && { route: meta.route }),
   };
   const logger = deps.logger ?? silentLogger;
   // One line per check, logged once when the results arrive; the transition
@@ -1382,6 +1421,7 @@ async function resumeRun(
     pollMs,
     adapter: route.receiving,
     routeTrust: route.trust,
+    routeDecision: route,
     recordOutcome,
   });
 

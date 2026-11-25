@@ -76,6 +76,15 @@
 //! it rather than inventing an empty list — "nobody looked" and "it receives
 //! nothing" are different facts, and a default would conflate them.
 //!
+//! The receive list with its amount bounds (`DataKey::Receive(domain)`) is a
+//! third key, and here the reason is mechanical as well. A stored struct is
+//! decoded by its exact set of fields, so a field added to `AnchorMeta` would
+//! make every metadata entry written before it unreadable until someone
+//! rewrote it. `DataKey` is therefore append-only, and so are the structs it
+//! points at: a new fact gets a new variant at the end, never a new field on a
+//! value that is already stored. The `a_stored_struct_cannot_gain_a_field` test
+//! shows the failure this avoids.
+//!
 //! ## What metadata is, and what it is not
 //!
 //! `AnchorMeta` holds two things, and the facts-not-opinions rule above still
@@ -90,6 +99,12 @@
 //! same freshness discipline as the bitmaps. See `docs/registry-metadata.md`
 //! for why this is a second key rather than a new field on `AnchorRecord`, and
 //! for the bounds `put_meta` enforces.
+//!
+//! `ReceiveList` is OBSERVED as well: the assets a SEP-31 `/info` response
+//! listed, with the `min_amount` and `max_amount` it stated for each. It repeats
+//! the codes `AnchorMeta::receive_assets` holds, on its own clock. The two are
+//! written by separate calls, so either can be the newer one, and each says
+//! which ledger it was read at.
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
@@ -138,6 +153,13 @@ pub const MAX_ASSET_CODE_LEN: u32 = 32;
 /// than ranged so `country` can be compared by consumers without normalising,
 /// and so a free-text address line cannot be written into it by accident.
 pub const COUNTRY_CODE_LEN: u32 = 2;
+
+/// Decimal places of the amounts in a [`ReceiveAsset`]: a stored bound is the
+/// number the anchor gave multiplied by `10^AMOUNT_DECIMALS`. Seven because that
+/// is the precision Stellar itself carries (one stroop), so a bound and the
+/// payment it is compared against are in the same unit and no reader has to
+/// guess a scale.
+pub const AMOUNT_DECIMALS: u32 = 7;
 
 /// Ledgers close about every 5 seconds.
 pub const LEDGERS_PER_DAY: u32 = 17_280;
@@ -198,6 +220,42 @@ pub struct AnchorMeta {
     pub attester: Address,
 }
 
+/// One asset from an anchor's SEP-31 `/info` receive list, with the amount
+/// bounds the response stated for it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiveAsset {
+    /// The code exactly as `/info` keyed it. Bounded and checked the same way as
+    /// a code in `AnchorMeta::receive_assets`.
+    pub code: String,
+    /// OBSERVED: the `min_amount` the response gave for this asset, scaled by
+    /// `10^AMOUNT_DECIMALS`. `None` when the response gave none, which is not a
+    /// minimum of zero: it is "the anchor did not say".
+    pub min_amount: Option<i128>,
+    /// OBSERVED: the `max_amount` the response gave, on the same scale. `None`
+    /// when the response gave none, which is not "no upper bound".
+    pub max_amount: Option<i128>,
+}
+
+/// The receive list of one anchor as a SEP-31 `/info` response gave it: every
+/// asset it listed, each with its bounds. Read in one call, so a planner can
+/// rule a lane in or out by amount without asking the anchor.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiveList {
+    /// Anchor home domain the list was read under.
+    pub domain: String,
+    /// OBSERVED, in the order the endpoint returned it. Empty when the probe
+    /// ran and the anchor listed nothing.
+    pub assets: Vec<ReceiveAsset>,
+    /// Ledger at which the list was read. Its own clock, like `AnchorMeta`'s:
+    /// it is written by its own call, so it can be older or newer than both the
+    /// record and the metadata beside it.
+    pub attested_ledger: u32,
+    /// Which attester address produced this list.
+    pub attester: Address,
+}
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -212,6 +270,11 @@ enum DataKey {
     /// `Anchor(String)`: writing it must not have to rewrite the record, and
     /// records that predate it must stay readable untouched.
     Meta(String),
+    /// The SEP-31 receive list with its amount bounds, for a domain. Appended
+    /// after `Meta` and not folded into it: a stored `AnchorMeta` is decoded by
+    /// its exact set of fields, so a new field there would make every metadata
+    /// entry written before it unreadable. See "Migration" in the header.
+    Receive(String),
 }
 
 #[contracterror]
@@ -238,6 +301,9 @@ pub enum Error {
     DuplicateAsset = 9,
     /// A country that is not `COUNTRY_CODE_LEN` uppercase ASCII letters.
     InvalidCountry = 10,
+    /// A receive bound below zero. An amount cannot be negative, so this is a
+    /// writer's mistake and not something an anchor could have meant.
+    InvalidAmount = 11,
 }
 
 const SEP_MASK: u32 = (1u32 << SEP_NUMBERS.len()) - 1;
@@ -314,6 +380,18 @@ pub struct MetaAttested {
     pub attester: Address,
 }
 
+/// Emitted on every accepted receive-list write. Its own event for the reason
+/// `MetaAttested` has one: it is a separate call that lands in its own ledger.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiveAttested {
+    #[topic]
+    pub domain: String,
+    pub assets: Vec<ReceiveAsset>,
+    pub attested_ledger: u32,
+    pub attester: Address,
+}
+
 /// Keeps the contract instance (its `Admin`, `Attester` and `Domains`, and its
 /// code) alive. Called from every path that writes instance storage.
 fn extend_instance(env: &Env) {
@@ -347,6 +425,35 @@ fn check_receive_assets(assets: &Vec<String>) -> Result<(), Error> {
         }
         for j in (i + 1)..assets.len() {
             if a == assets.get_unchecked(j) {
+                return Err(Error::DuplicateAsset);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a receive list the way `put_receive` stores it. The codes follow
+/// the rules of [`check_receive_assets`]: bounded in count and length, none
+/// empty, none written twice. A bound may be absent, and may not be negative.
+///
+/// `min_amount` above `max_amount` is NOT refused. It is what the endpoint said,
+/// and a reader comparing an amount against the pair gets the right answer from
+/// it: nothing fits. Correcting it here would be this registry deciding what an
+/// anchor meant.
+fn check_receive_list(assets: &Vec<ReceiveAsset>) -> Result<(), Error> {
+    if assets.len() > MAX_RECEIVE_ASSETS {
+        return Err(Error::TooManyAssets);
+    }
+    for i in 0..assets.len() {
+        let a = assets.get_unchecked(i);
+        if a.code.is_empty() || a.code.len() > MAX_ASSET_CODE_LEN {
+            return Err(Error::InvalidAssetCode);
+        }
+        if a.min_amount.is_some_and(|v| v < 0) || a.max_amount.is_some_and(|v| v < 0) {
+            return Err(Error::InvalidAmount);
+        }
+        for j in (i + 1)..assets.len() {
+            if a.code == assets.get_unchecked(j).code {
                 return Err(Error::DuplicateAsset);
             }
         }
@@ -524,6 +631,64 @@ impl Registry {
         Ok(())
     }
 
+    /// Record (or replace) the receive list a SEP-31 `/info` response gave for a
+    /// domain: every asset it listed, each with the `min_amount` and
+    /// `max_amount` it stated. Same writer restriction as
+    /// [`Registry::put_anchor`], and like [`Registry::put_meta`] it needs a
+    /// record to exist.
+    ///
+    /// Its own call and its own key, for the reasons metadata has them. A probe
+    /// that could not read `/info` still gets its bitmaps on chain, the methods
+    /// the deployed attester already calls keep their signatures, and no entry
+    /// written before this existed has to be rewritten.
+    ///
+    /// An empty list says the probe ran and the anchor listed nothing. To say
+    /// nothing was observed, do not call this: `get_receive` reports the missing
+    /// entry as `NotFound`.
+    pub fn put_receive(
+        env: Env,
+        domain: String,
+        assets: Vec<ReceiveAsset>,
+        attester: Address,
+    ) -> Result<(), Error> {
+        let writer: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attester)
+            .ok_or(Error::NotInitialised)?;
+        writer.require_auth();
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Anchor(domain.clone()))
+        {
+            return Err(Error::NotFound);
+        }
+        check_receive_list(&assets)?;
+
+        let key = DataKey::Receive(domain.clone());
+        let attested_ledger = env.ledger().sequence();
+        let list = ReceiveList {
+            domain: domain.clone(),
+            assets: assets.clone(),
+            attested_ledger,
+            attester: attester.clone(),
+        };
+        env.storage().persistent().set(&key, &list);
+        extend_record(&env, &key);
+        extend_instance(&env);
+
+        ReceiveAttested {
+            domain,
+            assets,
+            attested_ledger,
+            attester,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Extend the lifetime of a record, and of the contract instance, without
     /// re-attesting. Permissionless on purpose: keeping a fact readable costs the
     /// caller a fee and changes nothing, `attested_ledger` included, so there is
@@ -532,6 +697,7 @@ impl Registry {
     /// Extends the domain's metadata entry too when it has one — it expires on
     /// its own clock, and letting it archive while the record next to it stays
     /// live would leave a domain that answers `get_anchor` but not `get_meta`.
+    /// The receive list is extended the same way, for the same reason.
     ///
     /// Cannot revive an entry that is already archived; see "Restoring an
     /// archived entry" in the header.
@@ -541,9 +707,13 @@ impl Registry {
             return Err(Error::NotFound);
         }
         extend_record(&env, &key);
-        let meta_key = DataKey::Meta(domain);
+        let meta_key = DataKey::Meta(domain.clone());
         if env.storage().persistent().has(&meta_key) {
             extend_record(&env, &meta_key);
+        }
+        let receive_key = DataKey::Receive(domain);
+        if env.storage().persistent().has(&receive_key) {
+            extend_record(&env, &receive_key);
         }
         extend_instance(&env);
         Ok(())
@@ -575,6 +745,40 @@ impl Registry {
     /// things an anchor may well answer differently.
     pub fn receives_asset(env: Env, domain: String, code: String) -> Result<bool, Error> {
         Ok(Self::get_meta(env, domain)?.receive_assets.contains(&code))
+    }
+
+    /// The receive list observed for a domain: every asset its SEP-31 `/info`
+    /// listed, each with its bounds.
+    ///
+    /// `NotFound` when nobody has written one, which covers every domain
+    /// attested before this existed. As with `get_meta`, that is not an empty
+    /// list, and it is not "no limits".
+    pub fn get_receive(env: Env, domain: String) -> Result<ReceiveList, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Receive(domain))
+            .ok_or(Error::NotFound)
+    }
+
+    /// The bounds observed for one asset code, e.g. "how much NGN will this
+    /// anchor take". Matches the stored code exactly, like `receives_asset`.
+    ///
+    /// Three answers, kept apart: `NotFound` when no receive list was ever
+    /// written for the domain, `None` when one was and it does not list the
+    /// code, and the entry itself otherwise. The entry's bounds can each be
+    /// `None` too, when the anchor listed the asset and stated no bound.
+    pub fn receive_limits(
+        env: Env,
+        domain: String,
+        code: String,
+    ) -> Result<Option<ReceiveAsset>, Error> {
+        let list = Self::get_receive(env, domain)?;
+        for asset in list.assets.iter() {
+            if asset.code == code {
+                return Ok(Some(asset));
+            }
+        }
+        Ok(None)
     }
 
     /// Every registered domain. Bounded by `MAX_DOMAINS`.

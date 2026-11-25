@@ -8,10 +8,14 @@
 // exactly what it found — the point of the registry is that nobody, including
 // this script, gets to assert a capability that was not observed.
 //
-// Each domain is written in two calls: the bitmaps, and the metadata (the
-// receive assets SEP-31 actually listed, plus the country the anchor declared).
-// The second is skipped when the probe never produced a receive list, because
-// not-recording and recording-nothing are different claims.
+// Each domain is written in three calls: the bitmaps, the metadata (the receive
+// assets SEP-31 actually listed, plus the country the anchor declared), and the
+// receive list again with the amount bounds stated for each asset. The last two
+// are skipped when the probe never produced a receive list, because not-recording
+// and recording-nothing are different claims.
+//
+// A deployed attester that predates the third write is not a failed run: the
+// first two are still written, and the run warns once that the limits were not.
 //
 // The signing key must have been enrolled with `add_attester`. Reading the
 // registry needs no key at all; see `pnpm registry:read`.
@@ -22,6 +26,7 @@ import {
   probeAnchor,
   decodeProbes,
   decodeSeps,
+  describeReceiveLimits,
   loadFleet,
   loadProbeResultsFromFile,
   parseAttestArgs,
@@ -87,6 +92,8 @@ async function main(): Promise<void> {
   console.log(`contract ${cfg.attester}\n`);
 
   let failures = 0;
+  // Set when the deployed attester turns out to predate `attest_receive`.
+  let limitsUnsupported = false;
   for (const result of results) {
     const passed = decodeProbes(result.probesPassed);
     const failed = decodeProbes(result.probesRun).filter((p) => !passed.includes(p));
@@ -133,6 +140,35 @@ async function main(): Promise<void> {
       console.log(`  ${cooldown ? "•" : "✗"} ${meta.error.code}: ${meta.error.message}\n`);
       if (!cooldown) failures += 1;
     }
+
+    // The same list with the bounds stated for each asset. Once the deployed
+    // attester has turned out not to have this write, it is not tried again.
+    if (result.receiveLimits === undefined || limitsUnsupported) continue;
+    const receive = await attester.attestReceive(result);
+    if (receive.ok) {
+      console.log(
+        `  ✓ limits    ${describeReceiveLimits(result.receiveLimits)}` +
+          ` — ${receive.value.txHash} (ledger ${receive.value.ledger})\n`,
+      );
+    } else if (receive.error.methodMissing) {
+      limitsUnsupported = true;
+      console.log(`  • limits    not written: ${receive.error.message}\n`);
+    } else {
+      const cooldown = receive.error.contractError === AttesterContractError.TooSoon;
+      console.log(
+        `  ${cooldown ? "•" : "✗"} ${receive.error.code}: ${receive.error.message}\n`,
+      );
+      if (!cooldown) failures += 1;
+    }
+  }
+
+  if (limitsUnsupported) {
+    // Said once and loudly, not once per domain: a run that quietly skips a
+    // third of what it was asked to write is how a registry falls behind.
+    const warning =
+      "receive limits were not written for any domain: attest_receive is not deployed. " +
+      "upgrade() the registry and the attester to record them.";
+    console.log(process.env.GITHUB_ACTIONS === "true" ? `::warning::${warning}` : warning);
   }
 
   if (failures > 0) {

@@ -962,3 +962,604 @@ fn bump_keeps_metadata_alive_alongside_the_record() {
     assert_eq!(record_ttl, TTL_EXTEND_TO);
     assert_eq!(meta_ttl, TTL_EXTEND_TO);
 }
+
+// ─── receive list with amount bounds ─────────────────────────────────────────
+//
+// A third key beside the record and the metadata. The tests that matter most are
+// the upgrade ones again: nothing stored before this existed may change shape or
+// stop reading, and a domain with no receive list must not read as an anchor
+// with no limits.
+
+/// One whole unit of an asset on the registry's scale.
+const ONE: i128 = 10_000_000;
+
+fn entry(env: &Env, code: &str, min: Option<i128>, max: Option<i128>) -> ReceiveAsset {
+    ReceiveAsset {
+        code: String::from_str(env, code),
+        min_amount: min,
+        max_amount: max,
+    }
+}
+
+fn receive(env: &Env, entries: &[(&str, Option<i128>, Option<i128>)]) -> Vec<ReceiveAsset> {
+    let mut v = Vec::new(env);
+    for (code, min, max) in entries {
+        v.push_back(entry(env, code, *min, *max));
+    }
+    v
+}
+
+/// A list of `n` distinct codes with no bounds, for the count checks.
+fn unbounded(env: &Env, names: &[&str]) -> Vec<ReceiveAsset> {
+    let mut v = Vec::new(env);
+    for code in names {
+        v.push_back(entry(env, code, None, None));
+    }
+    v
+}
+
+#[test]
+fn the_amount_scale_is_seven_decimal_places() {
+    // Spelled out so that changing the scale fails here first: every bound
+    // already on chain was written on this one.
+    assert_eq!(AMOUNT_DECIMALS, 7);
+    assert_eq!(ONE, 10i128.pow(AMOUNT_DECIMALS));
+}
+
+#[test]
+fn stores_and_reads_back_a_receive_list() {
+    let f = setup();
+    f.env.ledger().set_sequence_number(3_000);
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    let sent = receive(
+        &f.env,
+        &[
+            ("NGN", Some(1_000 * ONE), Some(5_000_000 * ONE)),
+            ("USDC", Some(ONE / 10), Some(10_000 * ONE)),
+        ],
+    );
+    f.client.put_receive(&d, &sent, &f.attester);
+
+    let got = f.client.get_receive(&d);
+    assert_eq!(got.domain, d);
+    assert_eq!(got.assets, sent);
+    assert_eq!(got.attested_ledger, 3_000);
+    assert_eq!(got.attester, f.attester);
+    // 0.1 USDC is one million stroops, not zero and not one.
+    assert_eq!(got.assets.get_unchecked(1).min_amount, Some(1_000_000));
+}
+
+#[test]
+fn a_receive_list_write_leaves_the_record_and_the_metadata_alone() {
+    let f = setup();
+    f.env.ledger().set_sequence_number(1_000);
+    let d = domain(&f.env);
+    put(&f, &d);
+    f.env.ledger().set_sequence_number(2_000);
+    put_meta(&f, &d, &["NGN"], country(&f.env, "NG"));
+    let record = f.client.get_anchor(&d);
+    let meta = f.client.get_meta(&d);
+
+    f.env.ledger().set_sequence_number(5_000);
+    f.client.put_receive(
+        &d,
+        &receive(&f.env, &[("NGN", Some(ONE), None)]),
+        &f.attester,
+    );
+
+    // Three keys, three clocks. Writing the third moved neither of the others.
+    assert_eq!(f.client.get_anchor(&d), record);
+    assert_eq!(f.client.get_meta(&d), meta);
+    assert_eq!(f.client.get_anchor(&d).attested_ledger, 1_000);
+    assert_eq!(f.client.get_meta(&d).attested_ledger, 2_000);
+    assert_eq!(f.client.get_receive(&d).attested_ledger, 5_000);
+}
+
+#[test]
+fn rewriting_the_record_or_the_metadata_does_not_erase_the_receive_list() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    let sent = receive(&f.env, &[("NGN", Some(ONE), Some(9 * ONE))]);
+    f.client.put_receive(&d, &sent, &f.attester);
+
+    put(&f, &d);
+    put_meta(&f, &d, &["NGN", "XOF"], country(&f.env, "NG"));
+
+    assert_eq!(f.client.get_receive(&d).assets, sent);
+}
+
+#[test]
+fn a_domain_with_no_receive_list_reads_not_found_rather_than_empty() {
+    // The pre-upgrade case: a record and metadata written before the receive
+    // list existed. Both must read exactly as before, and the missing list must
+    // not be reported as "receives nothing" or as "no limits".
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    put_meta(&f, &d, &["NGN"], country(&f.env, "NG"));
+
+    assert!(f.client.serves_sep31(&d));
+    assert_eq!(
+        f.client.get_meta(&d).receive_assets,
+        codes(&f.env, &["NGN"])
+    );
+    assert!(f
+        .client
+        .receives_asset(&d, &String::from_str(&f.env, "NGN")));
+
+    assert_eq!(f.client.try_get_receive(&d), Err(Ok(Error::NotFound)));
+    assert_eq!(
+        f.client
+            .try_receive_limits(&d, &String::from_str(&f.env, "NGN")),
+        Err(Ok(Error::NotFound))
+    );
+}
+
+#[test]
+fn a_receive_list_about_an_unattested_domain_is_refused() {
+    let f = setup();
+    let d = String::from_str(&f.env, "never-attested.example");
+
+    let res = f.client.try_put_receive(
+        &d,
+        &receive(&f.env, &[("NGN", Some(ONE), None)]),
+        &f.attester,
+    );
+    assert_eq!(res, Err(Ok(Error::NotFound)));
+    assert_eq!(f.client.try_get_receive(&d), Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn receive_limits_keeps_its_three_answers_apart() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    let ngn = String::from_str(&f.env, "NGN");
+
+    // 1. Nobody has written a list: not an answer about NGN at all.
+    assert_eq!(
+        f.client.try_receive_limits(&d, &ngn),
+        Err(Ok(Error::NotFound))
+    );
+
+    f.client.put_receive(
+        &d,
+        &receive(
+            &f.env,
+            &[
+                ("NGN", Some(1_000 * ONE), Some(50_000 * ONE)),
+                ("KES", None, None),
+            ],
+        ),
+        &f.attester,
+    );
+
+    // 2. A list was written and holds the code: its entry.
+    assert_eq!(
+        f.client.receive_limits(&d, &ngn),
+        Some(entry(&f.env, "NGN", Some(1_000 * ONE), Some(50_000 * ONE)))
+    );
+    // 3. A list was written and does not hold the code. Not a prefix, not a
+    //    substring, not a different case.
+    for other in ["NG", "NGNT", "ngn", "USDC"] {
+        assert_eq!(
+            f.client
+                .receive_limits(&d, &String::from_str(&f.env, other)),
+            None,
+            "matched {other:?}"
+        );
+    }
+}
+
+#[test]
+fn a_bound_the_anchor_did_not_state_is_none_and_not_zero() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    f.client.put_receive(
+        &d,
+        &receive(
+            &f.env,
+            &[
+                ("KES", None, None),
+                ("NGN", Some(0), None),
+                ("XOF", None, Some(7 * ONE)),
+            ],
+        ),
+        &f.attester,
+    );
+
+    let kes = f
+        .client
+        .receive_limits(&d, &String::from_str(&f.env, "KES"))
+        .unwrap();
+    assert_eq!((kes.min_amount, kes.max_amount), (None, None));
+    // A stated minimum of zero is a statement. It reads back as zero.
+    let ngn = f
+        .client
+        .receive_limits(&d, &String::from_str(&f.env, "NGN"))
+        .unwrap();
+    assert_eq!((ngn.min_amount, ngn.max_amount), (Some(0), None));
+    let xof = f
+        .client
+        .receive_limits(&d, &String::from_str(&f.env, "XOF"))
+        .unwrap();
+    assert_eq!((xof.min_amount, xof.max_amount), (None, Some(7 * ONE)));
+}
+
+#[test]
+fn an_empty_receive_list_is_a_finding_too() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    f.client
+        .put_receive(&d, &Vec::<ReceiveAsset>::new(&f.env), &f.attester);
+
+    assert_eq!(f.client.get_receive(&d).assets.len(), 0);
+    // Asked, and it lists nothing: `None`, where a domain nobody asked is
+    // `NotFound`.
+    assert_eq!(
+        f.client
+            .receive_limits(&d, &String::from_str(&f.env, "NGN")),
+        None
+    );
+}
+
+#[test]
+fn keeps_the_order_the_endpoint_returned() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    let sent = unbounded(&f.env, &["ZAR", "AAA", "NGN"]);
+    f.client.put_receive(&d, &sent, &f.attester);
+
+    assert_eq!(f.client.get_receive(&d).assets, sent);
+}
+
+#[test]
+fn a_replaced_receive_list_is_the_new_one_whole() {
+    // A second write is a replacement, not a merge: an asset the anchor stopped
+    // listing must not linger from the last observation.
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    f.client.put_receive(
+        &d,
+        &receive(&f.env, &[("NGN", Some(ONE), None), ("KES", None, None)]),
+        &f.attester,
+    );
+
+    let second = receive(&f.env, &[("NGN", Some(2 * ONE), Some(3 * ONE))]);
+    f.client.put_receive(&d, &second, &f.attester);
+
+    assert_eq!(f.client.get_receive(&d).assets, second);
+    assert_eq!(
+        f.client
+            .receive_limits(&d, &String::from_str(&f.env, "KES")),
+        None
+    );
+}
+
+#[test]
+fn stores_a_minimum_above_the_maximum_as_it_was_observed() {
+    // Not refused and not swapped. A reader comparing an amount against the
+    // pair finds that nothing fits, which is what such an endpoint offers.
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    f.client.put_receive(
+        &d,
+        &receive(&f.env, &[("NGN", Some(100 * ONE), Some(10 * ONE))]),
+        &f.attester,
+    );
+
+    let ngn = f
+        .client
+        .receive_limits(&d, &String::from_str(&f.env, "NGN"))
+        .unwrap();
+    assert_eq!(ngn.min_amount, Some(100 * ONE));
+    assert_eq!(ngn.max_amount, Some(10 * ONE));
+}
+
+#[test]
+fn rejects_a_negative_bound() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    for (min, max) in [
+        (Some(-1), None),
+        (None, Some(-1)),
+        (Some(ONE), Some(-ONE)),
+        (Some(i128::MIN), Some(ONE)),
+    ] {
+        let res = f
+            .client
+            .try_put_receive(&d, &receive(&f.env, &[("NGN", min, max)]), &f.attester);
+        assert_eq!(
+            res,
+            Err(Ok(Error::InvalidAmount)),
+            "accepted {min:?}..{max:?}"
+        );
+    }
+    // A bad entry anywhere in the list refuses the whole write.
+    let res = f.client.try_put_receive(
+        &d,
+        &receive(&f.env, &[("KES", Some(ONE), None), ("NGN", Some(-1), None)]),
+        &f.attester,
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidAmount)));
+    assert_eq!(f.client.try_get_receive(&d), Err(Ok(Error::NotFound)));
+
+    // Zero and the largest amount there is are both fine.
+    f.client.put_receive(
+        &d,
+        &receive(&f.env, &[("NGN", Some(0), Some(i128::MAX))]),
+        &f.attester,
+    );
+    assert_eq!(
+        f.client.get_receive(&d).assets,
+        receive(&f.env, &[("NGN", Some(0), Some(i128::MAX))])
+    );
+}
+
+#[test]
+fn rejects_more_receive_entries_than_the_bound_allows() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    f.client
+        .put_receive(&d, &unbounded(&f.env, &ASSET_NAMES[..32]), &f.attester);
+    assert_eq!(f.client.get_receive(&d).assets.len(), MAX_RECEIVE_ASSETS);
+
+    let res = f
+        .client
+        .try_put_receive(&d, &unbounded(&f.env, &ASSET_NAMES), &f.attester);
+    assert_eq!(res, Err(Ok(Error::TooManyAssets)));
+    // The refused write changed nothing.
+    assert_eq!(f.client.get_receive(&d).assets.len(), MAX_RECEIVE_ASSETS);
+}
+
+#[test]
+fn rejects_a_receive_entry_whose_code_is_not_a_code() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    for bad in ["", OVER_LIMIT_CODE] {
+        let res = f
+            .client
+            .try_put_receive(&d, &unbounded(&f.env, &["NGN", bad]), &f.attester);
+        assert_eq!(res, Err(Ok(Error::InvalidAssetCode)), "accepted {bad:?}");
+    }
+    f.client
+        .put_receive(&d, &unbounded(&f.env, &[AT_LIMIT_CODE]), &f.attester);
+    assert_eq!(f.client.get_receive(&d).assets.len(), 1);
+}
+
+#[test]
+fn rejects_the_same_code_listed_twice_in_a_receive_list() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    // Different bounds do not make it a different asset: two entries for one
+    // code would give `receive_limits` two answers.
+    let res = f.client.try_put_receive(
+        &d,
+        &receive(
+            &f.env,
+            &[
+                ("NGN", Some(ONE), None),
+                ("KES", None, None),
+                ("NGN", Some(2 * ONE), None),
+            ],
+        ),
+        &f.attester,
+    );
+    assert_eq!(res, Err(Ok(Error::DuplicateAsset)));
+}
+
+#[test]
+fn a_receive_list_needs_the_attesters_authorisation() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    let sent = receive(&f.env, &[("NGN", Some(ONE), None)]);
+
+    // Stop accepting every signature. Nothing has signed from here on, so the
+    // only way this write gets through is if `put_receive` forgot to ask.
+    f.env.set_auths(&[]);
+    let res = f.client.try_put_receive(&d, &sent, &f.attester);
+    assert!(
+        matches!(res, Err(Err(_))),
+        "an unauthorised write must abort, got {res:?}"
+    );
+    assert_eq!(f.client.try_get_receive(&d), Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn emits_its_own_event_for_a_receive_list() {
+    let f = setup();
+    f.env.ledger().set_sequence_number(8_888);
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    let sent = receive(
+        &f.env,
+        &[("NGN", Some(ONE), Some(5 * ONE)), ("KES", None, None)],
+    );
+    f.client.put_receive(&d, &sent, &f.attester);
+
+    // One event for this write, and it is neither of the other two.
+    let all_events = f.env.events().all();
+    let events = all_events.events();
+    assert_eq!(events.len(), 1);
+    let expected = ReceiveAttested {
+        domain: d,
+        assets: sent,
+        attested_ledger: 8_888,
+        attester: f.attester.clone(),
+    }
+    .to_xdr(&f.env, &f.client.address);
+    assert_eq!(events[0], expected);
+}
+
+fn receive_ttl(f: &Fixture, d: &String) -> u32 {
+    f.env.as_contract(&f.client.address, || {
+        f.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Receive(d.clone()))
+    })
+}
+
+#[test]
+fn a_receive_list_write_extends_its_own_entry() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    f.client
+        .put_receive(&d, &unbounded(&f.env, &["NGN"]), &f.attester);
+
+    assert_eq!(receive_ttl(&f, &d), TTL_EXTEND_TO);
+}
+
+#[test]
+fn bump_keeps_the_receive_list_alive_alongside_the_record() {
+    // The list expires on its own key, like the metadata. If bump skipped it, a
+    // quiet domain would keep its record and lose its limits.
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    f.client
+        .put_receive(&d, &unbounded(&f.env, &["NGN"]), &f.attester);
+
+    advance(&f, TTL_EXTEND_TO - 100);
+    assert_eq!(receive_ttl(&f, &d), 100);
+    f.client.bump(&d);
+
+    assert_eq!(record_ttl(&f, &d), TTL_EXTEND_TO);
+    assert_eq!(receive_ttl(&f, &d), TTL_EXTEND_TO);
+}
+
+#[test]
+fn bump_still_works_for_a_domain_with_no_receive_list() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+    advance(&f, TTL_EXTEND_TO - 100);
+
+    f.client.bump(&d);
+
+    assert_eq!(record_ttl(&f, &d), TTL_EXTEND_TO);
+    assert_eq!(f.client.try_get_receive(&d), Err(Ok(Error::NotFound)));
+}
+
+// ─── why the receive list is a new key and not a new field ───────────────────
+//
+// `DataKey` is append-only and so are the structs it points at. These two tests
+// are the reason, held in place: the first shows what a new field would do to
+// entries already stored, the second fails the day someone adds one to
+// `AnchorMeta`.
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShapeAsStored {
+    domain: String,
+    attested_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShapeWithOneMoreField {
+    domain: String,
+    attested_ledger: u32,
+    added_later: Option<u32>,
+}
+
+fn as_first_stored(env: &Env) -> ShapeAsStored {
+    ShapeAsStored {
+        domain: String::from_str(env, "testanchor.stellar.org"),
+        attested_ledger: 1_000,
+    }
+}
+
+#[test]
+fn a_stored_struct_reads_back_in_the_shape_it_was_written_in() {
+    use soroban_sdk::{IntoVal, TryFromVal, Val};
+
+    let env = Env::default();
+    let stored: Val = as_first_stored(&env).into_val(&env);
+
+    assert_eq!(
+        ShapeAsStored::try_from_val(&env, &stored).unwrap(),
+        as_first_stored(&env)
+    );
+}
+
+#[test]
+#[should_panic(expected = "UnexpectedSize")]
+fn a_stored_struct_cannot_gain_a_field() {
+    use soroban_sdk::{IntoVal, TryFromVal, Val};
+
+    let env = Env::default();
+    let stored: Val = as_first_stored(&env).into_val(&env);
+
+    // The same value, read as the same struct with one field added, and an
+    // optional one at that. There is no default to fall back on: the host
+    // refuses the decode outright, which inside a contract is a trap and not an
+    // error a caller could handle. Every entry written before the change would
+    // stop reading.
+    let _ = ShapeWithOneMoreField::try_from_val(&env, &stored);
+}
+
+/// `AnchorMeta` exactly as the first metadata entries were stored.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MetaAsFirstStored {
+    domain: String,
+    receive_assets: Vec<String>,
+    country: Option<String>,
+    attested_ledger: u32,
+    attester: Address,
+}
+
+#[test]
+fn metadata_stored_before_the_receive_list_existed_still_reads() {
+    let f = setup();
+    let d = domain(&f.env);
+    put(&f, &d);
+
+    // Write the entry directly, in the shape it has had since it was added.
+    let before = MetaAsFirstStored {
+        domain: d.clone(),
+        receive_assets: codes(&f.env, &["NGN", "KES"]),
+        country: country(&f.env, "NG"),
+        attested_ledger: 4_321,
+        attester: f.attester.clone(),
+    };
+    f.env.as_contract(&f.client.address, || {
+        f.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Meta(d.clone()), &before);
+    });
+
+    let meta = f.client.get_meta(&d);
+    assert_eq!(meta.receive_assets, codes(&f.env, &["NGN", "KES"]));
+    assert_eq!(meta.country, country(&f.env, "NG"));
+    assert_eq!(meta.attested_ledger, 4_321);
+    assert_eq!(meta.attester, f.attester);
+    assert!(f
+        .client
+        .receives_asset(&d, &String::from_str(&f.env, "KES")));
+}

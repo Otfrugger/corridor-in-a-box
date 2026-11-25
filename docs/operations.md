@@ -11,6 +11,10 @@ running migrations, and the project's versioning/release policy.
 > Treat this runbook as the plan for a self-run testnet/close-beta pilot, not a
 > claim of production-readiness.
 
+A licensed partner preparing a pilot with real money should work through
+[pilot-readiness.md](./pilot-readiness.md), which puts this runbook, the key-management guide
+and the threat model into one checklist.
+
 ## 0. Adding an anchor to the fleet
 
 `contracts/anchors.json` is the fleet's curated list of anchors. It is **not**
@@ -258,6 +262,30 @@ Exit codes are distinct so CI can tell the cases apart: `2` missing
 anchor does not quote), `4` the stack is not fit (`doctor` failed), `5` the
 corridor ran and did not complete.
 
+### `pnpm verify:crash-resume` — kill the service after settle
+
+```bash
+scripts/reference-anchor.sh up
+DATABASE_URL=postgres://… CORRIDOR_SIGNER_SECRET=S… pnpm verify:crash-resume
+```
+
+The live counterpart of `tests/integration/crash-resume.test.ts`. It starts
+`examples/run-service.ts` on Postgres, begins a payment, and sends `SIGKILL` to the
+service once the run holds a settlement transaction hash and is not yet
+`completed`. It then starts the service again on the same database, posts the same
+body, and requires `completed` with the same transaction hash and exactly one
+matching payment transaction from the signer on Horizon.
+
+The driver starts `payout-watch` itself, after the kill. The anchor only pays out when
+called, so the run cannot finish while the service is down. Run the script without
+a separate watcher.
+
+It uses the same exit codes as `verify:corridor`, with `5` meaning the run did not
+resume to one completed transaction. The service listens on `SERVICE_PORT` (default
+`8787`), service and watcher logs go to `LOG_DIR` (default `crash-resume-logs`),
+and the result is appended to `$GITHUB_STEP_SUMMARY` when that is set. The
+`reference-crash-resume` workflow runs it daily and on demand.
+
 **The signer** must be a testnet account holding the corridor's bridge asset with
 a trustline for it — `op_src_no_trust` above is exactly what a missing trustline
 looks like. `pnpm verify:settle` needs no such setup because it settles in native
@@ -267,6 +295,127 @@ XLM; this one settles the asset the anchor actually quotes.
 `GET /rate` throw `Buy amount must be greater than zero`, which surfaces as
 `QUOTE_UNAVAILABLE: quote HTTP 502`. `AMOUNT=1.00` reproduces it; the default of
 `10.00` does not.
+
+### Failing the reference anchor on purpose
+
+The reference server is a _conformant_ anchor: it pays out when told, never
+rejects, never asks for more information, never refunds, and hands out quotes
+valid until tomorrow. Live scenarios — and the recovery paths in §2 — need it to
+misbehave **on demand**, without waiting for a real anchor to have a bad day.
+
+`faults` is that control. It is a command in the same script, not a fork of the
+Anchor Platform: it plays the role of the anchor's business server (the
+interface the Kotlin reference server itself uses) and only moves a transaction
+the anchor has already received funds for.
+
+```bash
+scripts/reference-anchor.sh faults <spec>
+```
+
+| Spec             | What the anchor does                                 | How it is applied                                                                                                  |
+| ---------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `delay=N`        | Holds the fiat payout for `N` seconds                | Calls the reference server's test-only `POST /sep31/transactions/:id/process` late, exactly as `payout-watch` does |
+| `reject`         | Moves the transaction to `error`                     | Platform JSON-RPC `notify_transaction_error` (a full refund is still owed, so see §2)                              |
+| `ask-info`       | Moves it to `pending_customer_info_update`           | Writes the status the platform reads back on `GET /transactions/:id` (2.x has no RPC for it)                       |
+| `refund`         | Reports a **full** refund and moves it to `refunded` | Platform JSON-RPC `notify_refund_sent`; SEP-31 permits exactly one full refund                                     |
+| `quote-expiry=N` | Issues quotes that expire `N` seconds after issuance | A Postgres trigger on the platform's quote table, dropped as soon as one quote is caught                           |
+
+Each invocation arms one fault, waits for the **next payment** (a transaction
+opened after it was armed), applies it once, prints the SEP-31 transaction id
+and exits. To aim it at a specific payment instead:
+
+- `FAULT_TX_ID=<sep31 transaction id>` pins the transaction,
+- `FAULT_AMOUNT=<amount_in>` picks the payment by its on-chain amount,
+- `FAULT_TIMEOUT_SECS` (default `900`) bounds how long it waits — it exits
+  non-zero if no payment shows up, rather than hanging a CI job.
+
+`faults` replaces `payout-watch` for the run: both are the anchor operator, and
+only one should drive the payout. The faulted run is still a normal corridor
+run, so `EXPECT_STATE` on `pnpm verify:corridor` turns the expected terminal
+state into the assertion instead of "`completed`":
+
+```bash
+scripts/reference-anchor.sh up
+scripts/reference-anchor.sh faults refund &     # breaks the next payment
+CORRIDOR_SIGNER_SECRET=S… EXPECT_STATE=refunded pnpm verify:corridor
+```
+
+`scripts/fault-scenario.sh [spec] [expected-state]` is that sequence as one
+command — it arms the fault, runs the corridor with `EXPECT_STATE`, and fails if
+the fault never applied (`refund` is the default, and the only spec that implies
+its state):
+
+```bash
+scripts/fault-scenario.sh              # refund -> refunded
+scripts/fault-scenario.sh reject held  # a state the manifest actually reaches
+```
+
+It is a **live scenario**, not just an example: `.github/workflows/reference-corridor.yml`
+runs `scripts/fault-scenario.sh refund refunded` on its schedule, after the
+run that must reach `completed`, against the same reference stack. A regression
+in the injection therefore fails the nightly job instead of silently going
+undetected.
+
+That run ends `refunded`, not `completed`, because it passed through
+`refund_pending` after the anchor reported its refund — the path §2 describes,
+reproduced instead of waited for. `EXPECT_STATE` exits `0` only when the run
+reaches exactly that state (a run that completes anyway fails the assertion),
+and exits `5` the same way a normal run does when the expectation is not met.
+
+What to expect from the others, on `corridors/reference.corridor.yaml`
+(`rollback: refund_sender`, the default ~20s stall window):
+
+- **`delay=60`** — the engine sees `pending_receiver` unchanged and stops with
+  `RECONCILE_STALLED`; the payment already left, so the run parks in `held`.
+  Make `N` larger than `recovery.timeout_seconds` to reach `SETTLEMENT_TIMEOUT`
+  instead.
+- **`reject`** — a terminal failure with no refund to observe, so the run waits
+  on `refund_pending` until `recovery.refund_wait_seconds` and then `held`. Pair
+  it with `refund` (arm `refund` on the same transaction) to reach `refunded`.
+- **`ask-info`** — the anchor reports `pending_customer_info_update`, which the
+  engine classifies as _awaiting input_. An unchanged status still trips
+  `RECONCILE_STALLED` after ~20s; raise `recovery.reconcile.stall_polls` in a
+  copy of the manifest to let `SETTLEMENT_TIMEOUT` say
+  "awaiting input from another party" instead.
+- **`quote-expiry=0`** — the anchor's stored quote is already expired when it is
+  asked to open the transaction. Note the limit: the engine holds the expiry the
+  anchor _returned_ at quote time, so this exercises the anchor's own refusal of
+  a stale quote — it cannot re-price the quote the gate already holds.
+
+Faults are test-profile machinery, not a production control: they write to the
+platform's own database and use its internal business-server API, both of which
+are reachable only from this stack. `down` drops the quote trigger if a
+`quote-expiry` fault never caught a quote.
+
+### `pnpm load-test` — concurrent payments against the reference anchor
+
+```bash
+scripts/reference-anchor.sh up
+scripts/reference-anchor.sh payout-watch &
+CORRIDOR_SIGNER_SECRET=S… pnpm load-test
+```
+
+Sends `CONCURRENCY` (default 100, at most 100) testnet payments of `AMOUNT`
+(default `0.10`) at once through the full corridor lifecycle: SEP-12 customers,
+SEP-38 quote, SEP-31 transaction, Stellar settlement under the per-signer
+sequence lock, and reconciliation. It refuses a `network: public` manifest.
+
+It reports success and failure counts, latency (min, average, p50/p90/p95/p99,
+max) and a failure breakdown, and checks for duplicate settlements twice:
+
+- in the engine's own records: no two payments share a settlement hash;
+- on the ledger: it reads the signer's transactions from Horizon for the run's
+  window and fails if any payment memo was settled by more than one successful
+  transaction.
+
+The report goes to stdout and is appended to `$GITHUB_STEP_SUMMARY` (or
+`SUMMARY_FILE` outside Actions). The run exits non-zero on any failure or
+duplicate.
+
+`.github/workflows/load-test.yml` runs it on demand only (`workflow_dispatch`,
+never scheduled or on pull requests), with the same repository secrets as the
+reference corridor job: `CORRIDOR_SIGNER_SECRET` (a funded testnet account used
+only for this) and `REFERENCE_DISTRIBUTION_SECRET`.
 
 ### `corridor canary --write` — recording the proof it earns
 
@@ -567,6 +716,30 @@ The distribution account's seed is the highest-value secret; see
 4. Re-run the read-only integration suite against the anchor to confirm SEP-10
    auth still succeeds with the new account.
 5. Revoke the old key once no run references it.
+
+### The route-option secret and `ROUTE_OPTION_INVALID`
+
+A client can send the route the sender chose as a signed `routeOption` on
+`POST /payments`. The service checks its HMAC-SHA256 signature with
+`CORRIDOR_ROUTE_OPTION_SECRET` (`routeOptionSecret` in `createService`) before the
+engine starts. A locked option's quote is handed to the engine as the run's quote,
+so an expired one is refused rather than re-quoted. This key cannot move money, but
+whoever holds it can make the service accept an option it never issued, so keep it
+out of logs and out of the web bundle.
+
+Any failed check returns `ROUTE_OPTION_INVALID` with a `reason`, and no run starts:
+
+| Status | `reason`               | What to check                                                                  |
+| ------ | ---------------------- | ------------------------------------------------------------------------------ |
+| `422`  | `UNCONFIGURED`         | `CORRIDOR_ROUTE_OPTION_SECRET` is not set on this service                      |
+| `400`  | `INVALID_SIGNATURE`    | The option was signed with another key, or edited after signing                |
+| `409`  | `EXPIRED`              | The option or its locked quote expired; the client should fetch a fresh one    |
+| `422`  | `MISMATCH`             | The option names another corridor, amount or receiving anchor than the payment |
+| `422`  | `INVALID_LOCKED_QUOTE` | A `locked` option arrived without a usable quote                               |
+
+To rotate the secret, set the new value and restart. Options signed with the old key
+then fail with `INVALID_SIGNATURE`. They are short-lived, so a rotation only affects
+senders who were mid-checkout.
 
 ## 4. Database migrations
 

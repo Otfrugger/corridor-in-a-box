@@ -44,6 +44,32 @@ function storeFor(key: string): InMemoryIdempotencyStore {
   return store;
 }
 
+/** The fields @corridor/service's GET /payments/:key returns for a run. */
+export interface EngineDemoStatus {
+  readonly idempotencyKey: string;
+  readonly corridorId: string;
+  readonly state: CorridorState;
+  readonly transactionId?: string;
+  readonly stellarTxHash?: string;
+  readonly error?: string;
+}
+
+/** A demo run's stored status, shaped like the service's, or undefined if unknown. */
+export async function getEngineDemoPayment(
+  idempotencyKey: string,
+): Promise<EngineDemoStatus | undefined> {
+  const run = await idempotencyStores.get(idempotencyKey)?.get(idempotencyKey);
+  if (!run) return undefined;
+  return {
+    idempotencyKey: run.idempotencyKey,
+    corridorId: run.corridorId,
+    state: run.state,
+    transactionId: run.transactionId,
+    stellarTxHash: run.stellarTxHash,
+    error: run.lastError?.split(":")[0],
+  };
+}
+
 export async function runEngineDemoPayment(
   corridorId: string,
   amount: string,

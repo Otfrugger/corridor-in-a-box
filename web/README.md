@@ -5,7 +5,12 @@ A small Next.js (App Router, Tailwind v4) frontend for the engine:
 - **Dashboard** — every corridor in `../corridors/` with its liveness —
   `proven` / `verified` / `unverified` / `not runnable` — where only `proven` and
   `verified` count as runnable (`lib/corridors.ts`, using `liveness()` from
-  `@corridor/manifest`).
+  `@corridor/manifest`). Above them, the anchors attested in the on-chain registry
+  (`lib/registry.ts`) behind a Testnet / Mainnet switch. Every card names the network its
+  numbers come from, `?network=public` links straight to the mainnet view, and
+  `STELLAR_NETWORK` (`testnet` by default) sets which one opens first. A network with no
+  registry in `../contracts/deployments.json` says so, apart from a registry that could not
+  be read or one that is empty.
 - **Run a payment** — drive a payment through the engine and watch it walk the
   state machine, including the idempotent replay.
 - **Docs** — overview, getting started, architecture, HTTP API, key management, and

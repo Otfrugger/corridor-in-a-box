@@ -68,6 +68,7 @@ const TOML_FETCH_FAILURE_FIXTURE: ProbeResult = {
   tomlHash: "0".repeat(64),
   receiveAssets: [],
   outcomes: [{ probe: "toml_fetch", passed: false, detail: "fetch failed HTTP 404" }],
+  tomlFailureReason: "http_404",
 };
 
 describe("pure report builders (@corridor/probe/report)", () => {
@@ -173,6 +174,7 @@ describe("pure report builders (@corridor/probe/report)", () => {
       expect(broken.usableSep31).toBe(false);
       expect(broken.usableSep31OffRamp).toBe("no");
       expect(broken.tomlHash).toBe("0".repeat(64));
+      expect(broken.tomlFailureReason).toBe("http_404");
       expect(broken.outcomes[0]).toEqual({
         probe: "toml_fetch",
         passed: false,
@@ -342,6 +344,7 @@ describe("pure report builders (@corridor/probe/report)", () => {
       expect(results[0].domain).toBe("crash.com");
       expect(results[0].probesPassed).toBe(0);
       expect(results[0].outcomes[0].detail).toContain("DNS lookup timeout");
+      expect(results[0].tomlFailureReason).toBe("timeout");
     });
   });
 

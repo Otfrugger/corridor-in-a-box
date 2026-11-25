@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { LivenessBadge } from "@/components/LivenessBadge";
+import { NetworkBadge } from "@/components/NetworkBadge";
 import { liveness, type Corridor } from "@/lib/corridors";
 
 export function CorridorCard({ corridor }: { corridor: Corridor }) {
@@ -33,7 +34,11 @@ export function CorridorCard({ corridor }: { corridor: Corridor }) {
             ))}
           </div>
         </div>
-        <LivenessBadge state={live.state} />
+        {/* The network is the manifest's own: a corridor is written for one network. */}
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <LivenessBadge state={live.state} />
+          <NetworkBadge network={corridor.settlement.network} />
+        </div>
       </div>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">

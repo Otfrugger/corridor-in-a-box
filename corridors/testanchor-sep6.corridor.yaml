@@ -11,9 +11,21 @@
 # `@corridor/sep6` drives a `dest.protocol: sep6` corridor, and `liveness()` reads
 # the SEP-6 `transfer_server` for it, so `corridor plan` reports this lane VERIFIED
 # on the strength of the endpoints below, which were read from the anchor's
-# published stellar.toml. No payment has been attempted.
+# published stellar.toml.
+#
+# Payout attempted 2026-11-22 from funded testnet account
+# GDE2U4B6KFCLPOYDWU6EEVEYUZDXNY3NWWDJPB4WJUFYLYCPEFH6FZ7S. SEP-10 and SEP-12
+# succeeded (customer ACCEPTED) and GET /sep6/withdraw returned transaction
+# 19a2872f-278c-4867-9931-7e7f82ee67a6, but it stayed `incomplete` with no
+# withdraw_anchor_account or withdrawal memo, so no Stellar payment could be
+# sent. GET /sep6/withdraw-exchange rejects USDC with HTTP 400 ("invalid
+# operation for asset stellar:USDC:GBBD47IF…"), and the transaction's
+# more_info_url is the SEP-24 reference UI, whose business-server calls return
+# 401 for the SEP-6 more-info token. Seven withdrawals (USDC and native, both
+# funding methods) all stayed `incomplete`. No proof was earned; this file
+# records the attempt, not a completed payout.
 id: testanchor-sep6
-status_note: "SDF Test Anchor (testanchor.stellar.org) on testnet via SEP-6. Endpoints read from its stellar.toml 2026-10-17. No payment attempted; plan reports it VERIFIED from those endpoints alone."
+status_note: "SDF Test Anchor (testanchor.stellar.org) on testnet via SEP-6. Endpoints read from its stellar.toml 2026-10-17. Payout attempted 2026-11-22: SEP-10 and SEP-12 succeeded and /sep6/withdraw returned transaction 19a2872f-278c-4867-9931-7e7f82ee67a6, but it stayed incomplete with no withdraw_anchor_account and no Stellar payment was possible; /sep6/withdraw-exchange rejects USDC (HTTP 400) and the more_info_url rejects the SEP-6 token (401). No proof; plan reports it VERIFIED from those endpoints alone."
 
 source:
   name: Testnet Sending Anchor

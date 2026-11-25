@@ -157,6 +157,33 @@ describe("mock anchor: the protocol surface", () => {
     expect((await post("explode")).status).toBe(400);
   });
 
+  it("takes a configured quote fee off the buy amount and keeps total_price consistent", async () => {
+    const priced = await startMockAnchor({ quoteFee: "0.25" });
+    try {
+      const res = await fetch(`${priced.url}/sep38/quote`, {
+        method: "POST",
+        body: JSON.stringify({ sell_asset: "stellar:USDC:G", sell_amount: "10.00" }),
+      });
+      const q = (await res.json()) as {
+        buy_amount: string;
+        total_price: string;
+        fee: { total: string };
+      };
+      expect(res.status).toBe(201);
+      expect(q.buy_amount).toBe("9.75");
+      expect(q.fee.total).toBe("0.25");
+      expect(Number(q.total_price) * Number(q.buy_amount)).toBeCloseTo(10, 5);
+
+      const fine = await fetch(`${priced.url}/sep38/quote`, {
+        method: "POST",
+        body: JSON.stringify({ sell_asset: "stellar:USDC:G", sell_amount: "1.0012345" }),
+      });
+      expect(((await fine.json()) as { buy_amount: string }).buy_amount).toBe("0.7512345");
+    } finally {
+      await priced.close();
+    }
+  });
+
   it("lists every scenario the issue names", () => {
     expect([...SCENARIOS].sort()).toEqual(
       [

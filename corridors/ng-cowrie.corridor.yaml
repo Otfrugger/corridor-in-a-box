@@ -13,8 +13,27 @@
 # relationship. Cowrie also publishes no ANCHOR_QUOTE_SERVER (no SEP-38), so
 # `fx.quote_source` is `external`: there is no on-chain firm-quote path today,
 # only whatever off-protocol pricing Cowrie's own KYC'd integration exposes.
+#
+# Sandbox attempt (issue #683), checked 2026-11-24:
+#   - Cowrie's stellar.toml (cowrie.exchange, sha256
+#     11c1c8f721b2ac3742682949ddcbeec8866a98bfcff6a7ca1ee04b10ce109882) declares
+#     only NETWORK_PASSPHRASE "Public Global Stellar Network ; September 2015".
+#     It publishes no testnet toml and no testnet endpoints.
+#   - GET https://api.cowrie.exchange/web_auth?account=G… returned a SEP-10
+#     challenge whose network_passphrase is the public network one, so a testnet
+#     account cannot authenticate and a testnet payment cannot be made against it.
+#   - None of sandbox. / testnet. / staging. / api-sandbox. / sandbox-api. /
+#     docs. / developer(s).cowrie.exchange answer; the toml's ORG_URL
+#     (https://www.cowrie.exchange) reset the connection and cowrie.exchange /
+#     api.cowrie.exchange return 404 at the root. No public sandbox or developer
+#     documentation was found.
+#   - A sandbox could only come through Cowrie directly (support@cowrie.exchange,
+#     per the toml). No request has been sent from this repo yet, and SEP-12 KYC
+#     would need a real business relationship this repo does not have.
+#   Outcome: not attempted. No sandbox payment is possible today, and no real
+#   funds were used.
 id: ng-cowrie
-status_note: "REAL — Cowrie Exchange (Lagos, Nigeria), confirmed 2026-10-17. No SEP-38, no payment attempted, no business relationship in place."
+status_note: "REAL — Cowrie Exchange (Lagos, Nigeria), confirmed 2026-10-17. No SEP-38. Sandbox payment checked 2026-11-24: not possible — toml and SEP-10 are public-network only, no public sandbox found, no business relationship. No payment attempted."
 
 source:
   name: USD Sending Anchor

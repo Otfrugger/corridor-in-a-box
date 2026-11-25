@@ -55,6 +55,21 @@ describe("attest-from probe results loader (#238)", () => {
     expect(results[0].domain).toBe("testanchor.stellar.org");
   });
 
+  it("preserves tomlFailureReason when present", () => {
+    const failedResult: ProbeResult = {
+      domain: "failed.example.org",
+      seps: 0,
+      probesRun: probeBit("toml_fetch"),
+      probesPassed: 0,
+      tomlHash: VALID_TOML_HASH,
+      outcomes: [{ probe: "toml_fetch", passed: false, detail: "HTTP 403" }],
+      tomlFailureReason: "http_403",
+    };
+    const results = parseProbeResults([failedResult]);
+    expect(results).toHaveLength(1);
+    expect(results[0].tomlFailureReason).toBe("http_403");
+  });
+
   it("rejects dishonest results where probesPassed exceeds probesRun", () => {
     const dishonest: ProbeResult = {
       domain: "dishonest.anchor.org",

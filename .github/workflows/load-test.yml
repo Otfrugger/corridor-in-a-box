@@ -1,0 +1,129 @@
+# Executes a manual load test of 100 concurrent payments against the
+# reference anchor stack on Stellar Testnet, measures latency and failure
+# rates, and asserts zero duplicate settlements.
+#
+# Deliberately workflow_dispatch only; never scheduled.
+# Issue #681.
+name: load-test
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Number of concurrent payments to send (1-100)"
+        required: false
+        default: "100"
+      amount:
+        description: "Source amount per payment (testnet USDC)"
+        required: false
+        default: "0.10"
+
+permissions:
+  contents: read
+
+# One load test at a time: two runs would share the signer's sequence number.
+concurrency:
+  group: load-test
+  cancel-in-progress: false
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SIGNER_SECRET: ${{ secrets.CORRIDOR_SIGNER_SECRET }}
+      DISTRIBUTION_SECRET: ${{ secrets.REFERENCE_DISTRIBUTION_SECRET }}
+      MANIFEST: corridors/reference.corridor.yaml
+      CONCURRENCY: ${{ github.event.inputs.concurrency || '100' }}
+      AMOUNT: ${{ github.event.inputs.amount || '0.10' }}
+      CORRIDOR_ALLOW_MAINNET: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # --- safety guards ---
+      - name: Refuse a non-testnet corridor
+        run: pnpm exec tsx scripts/assert-testnet-corridor.ts "$MANIFEST"
+
+      - name: Check the runner prerequisites
+        run: |
+          set -euo pipefail
+          missing=""
+          grep -q 'doctor)' scripts/reference-anchor.sh \
+            || missing="$missing scripts/reference-anchor.sh#doctor"
+          node -e 'process.exit(require("./package.json").scripts["load-test"] ? 0 : 1)' \
+            || missing="$missing pnpm-load-test"
+          if [ -n "$missing" ]; then
+            echo "::error::this job needs, and cannot find:$missing"
+            exit 1
+          fi
+
+      - name: Fail early without a signing key
+        if: ${{ env.SIGNER_SECRET == '' }}
+        run: |
+          echo "::error::CORRIDOR_SIGNER_SECRET is not set. A load test settles on" \
+               "testnet and cannot run unsigned — set the repository secret to a funded" \
+               "testnet seed."
+          exit 1
+
+      - name: Fail early without the anchor receiving key
+        if: ${{ env.DISTRIBUTION_SECRET == '' }}
+        run: |
+          echo "::error::REFERENCE_DISTRIBUTION_SECRET is not set. The reference anchor needs" \
+               "a receiving account only this repo controls — set the repository secret to" \
+               "a testnet seed; pnpm prepare:distribution creates the account."
+          exit 1
+
+      # --- stand up reference anchor ---
+      - name: Prepare the anchor receiving account
+        run: pnpm prepare:distribution
+
+      - name: Stand up the reference anchor
+        run: scripts/reference-anchor.sh up
+        env:
+          READY_TIMEOUT_SECS: "600"
+
+      - name: Health gate
+        run: scripts/reference-anchor.sh doctor
+
+      - name: Top up the signer
+        run: pnpm fund:testnet
+        env:
+          CORRIDOR_SIGNER_SECRET: ${{ env.SIGNER_SECRET }}
+          FUND_AMOUNT: "50"
+          FUND_MIN_BALANCE: "100"
+
+      # --- run concurrent load test ---
+      - name: Run concurrent payments against reference anchor
+        run: |
+          set -euo pipefail
+          mkdir -p anchor-logs
+          scripts/reference-anchor.sh payout-watch > anchor-logs/payout-watch.log 2>&1 &
+          watcher=$!
+          trap 'kill "$watcher" 2>/dev/null || true' EXIT
+          pnpm load-test
+        env:
+          CORRIDOR_SIGNER_SECRET: ${{ env.SIGNER_SECRET }}
+          CONCURRENCY: ${{ env.CONCURRENCY }}
+          AMOUNT: ${{ env.AMOUNT }}
+
+      # --- evidence and cleanup ---
+      - name: Collect platform logs
+        if: ${{ failure() }}
+        run: scripts/reference-anchor.sh logs-dump anchor-logs
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ failure() }}
+        with:
+          name: load-test-logs-${{ github.run_id }}
+          path: anchor-logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Tear down reference anchor
+        if: ${{ always() }}
+        run: scripts/reference-anchor.sh down

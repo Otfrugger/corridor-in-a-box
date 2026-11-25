@@ -26,6 +26,11 @@
 //! already-deployed client calls stays valid, and so a probe that could not read
 //! an anchor's asset list can still put its bitmaps on chain.
 //!
+//! `attest_receive()` is the same path again, for the receive list with its
+//! amount bounds, relayed to `registry.put_receive()`. A third method for the
+//! same reason `attest_meta` is a second one: `attest` and `attest_meta` keep the
+//! signatures the deployed client calls.
+//!
 //! ## Rate limiting
 //!
 //! An attester may re-attest a given domain only once every `min_interval`
@@ -86,6 +91,25 @@ pub trait RegistryInterface {
         country: Option<String>,
         attester: Address,
     );
+
+    /// The receive list with its amount bounds, for a domain. Mirrors
+    /// `Registry::put_receive`.
+    fn put_receive(env: Env, domain: String, assets: Vec<ReceiveAsset>, attester: Address);
+}
+
+/// One entry of a SEP-31 receive list: an asset code and the bounds `/info`
+/// stated for it, scaled by `10^7`. Mirrors `ReceiveAsset` in the registry crate
+/// field for field. The two are one value on the wire, and this crate cannot
+/// import the other's type (see the note on `RegistryInterface`), so
+/// `a_receive_list_arrives_in_the_registry_as_it_was_sent` pins that they agree.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiveAsset {
+    pub code: String,
+    /// `None` when the anchor stated no minimum, which is not a minimum of zero.
+    pub min_amount: Option<i128>,
+    /// `None` when the anchor stated no maximum, which is not "no upper bound".
+    pub max_amount: Option<i128>,
 }
 
 #[contracttype]
@@ -105,6 +129,10 @@ enum DataKey {
     /// always fail. They rate limit each other not at all — a bitmap rewrite and
     /// a receive-asset rewrite cost the same and abuse the same way.
     LastMeta(String),
+    /// Ledger of the last accepted RECEIVE-LIST write for a domain. A third
+    /// clock, for the reason `LastMeta` is a second one: a sweep submits all
+    /// three writes for a domain back to back.
+    LastReceive(String),
 }
 
 #[contracterror]
@@ -128,6 +156,8 @@ pub enum Error {
     DuplicateAsset = 7,
     /// A country that is not a two-letter uppercase code.
     InvalidCountry = 8,
+    /// A receive bound below zero.
+    InvalidAmount = 9,
 }
 
 /// Ledgers close about every 5 seconds.
@@ -244,6 +274,14 @@ pub struct MetaAttested {
     pub attester: Address,
 }
 
+/// Emitted when a receive-list write is accepted and relayed.
+#[contractevent]
+pub struct ReceiveAttested {
+    #[topic]
+    pub domain: String,
+    pub attester: Address,
+}
+
 /// Keep one cooldown marker and the enrolment of the signer alive.
 fn touch_submission(env: &Env, last_key: &DataKey, attester: &Address) {
     extend_entry(env, last_key);
@@ -295,6 +333,30 @@ fn check_receive_assets(assets: &Vec<String>) -> Result<(), Error> {
         }
         for j in (i + 1)..assets.len() {
             if a == assets.get_unchecked(j) {
+                return Err(Error::DuplicateAsset);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject a receive list the registry cannot store, with this contract's error
+/// codes. The same checks as the registry's `check_receive_list`, duplicated for
+/// the reason `check_receive_assets` is.
+fn check_receive_list(assets: &Vec<ReceiveAsset>) -> Result<(), Error> {
+    if assets.len() > MAX_RECEIVE_ASSETS {
+        return Err(Error::TooManyAssets);
+    }
+    for i in 0..assets.len() {
+        let a = assets.get_unchecked(i);
+        if a.code.is_empty() || a.code.len() > MAX_ASSET_CODE_LEN {
+            return Err(Error::InvalidAssetCode);
+        }
+        if a.min_amount.is_some_and(|v| v < 0) || a.max_amount.is_some_and(|v| v < 0) {
+            return Err(Error::InvalidAmount);
+        }
+        for j in (i + 1)..assets.len() {
+            if a.code == assets.get_unchecked(j).code {
                 return Err(Error::DuplicateAsset);
             }
         }
@@ -427,6 +489,36 @@ impl Attester {
         env.storage().persistent().set(&last_key, &now);
         touch_submission(&env, &last_key, &attester);
         MetaAttested { domain, attester }.publish(&env);
+        Ok(())
+    }
+
+    /// Submit the receive list observed for `domain`: every asset its SEP-31
+    /// `/info` listed, with the bounds it stated for each.
+    ///
+    /// Its own method and its own cooldown (`LastReceive`), so `attest` and
+    /// `attest_meta` keep their signatures and a sweep may submit all three
+    /// writes for a domain in the same ledger.
+    pub fn attest_receive(
+        env: Env,
+        attester: Address,
+        domain: String,
+        assets: Vec<ReceiveAsset>,
+    ) -> Result<(), Error> {
+        let last_key = DataKey::LastReceive(domain.clone());
+        let now = check_submission(&env, &attester, &domain, &last_key)?;
+        check_receive_list(&assets)?;
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Registry)
+            .ok_or(Error::NotInitialised)?;
+
+        RegistryClient::new(&env, &registry).put_receive(&domain, &assets, &attester);
+
+        env.storage().persistent().set(&last_key, &now);
+        touch_submission(&env, &last_key, &attester);
+        ReceiveAttested { domain, attester }.publish(&env);
         Ok(())
     }
 

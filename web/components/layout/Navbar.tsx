@@ -13,13 +13,13 @@ const links = [
 export function Navbar() {
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <Boxes size={20} className="text-blue-600" />
           <span>corridor-in-a-box</span>
         </Link>
 
-        <nav aria-label="Main" className="flex items-center gap-1">
+        <nav aria-label="Main" className="flex flex-wrap items-center gap-1">
           {links.map((l) => (
             <Link
               key={l.href}

@@ -28,6 +28,7 @@ import { parseCorridor, type Corridor } from "@corridor/manifest";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
 import type { PaymentIntent } from "@corridor/types";
 import type { RouteDecision, RouteResolver } from "./index";
+import { ALL_PRICE_LABELS, type AllowedPriceLabel } from "./label-policy";
 
 /** The corridors and intent the suite hands to `makeResolver` and resolves with. */
 export interface ResolverContractFixtures {
@@ -316,6 +317,238 @@ export function describeResolverContract(
 ): void {
   describe(`RouteResolver contract: ${resolverName}`, () => {
     for (const c of contractFor(makeResolver, overrides).cases) {
+      it(c.name, async () => {
+        await c.run();
+      });
+    }
+  });
+}
+
+// describePlannerContract — the route planner's contract as executable tests.
+//
+// A planner turns a payment's candidate routes into the options a sender is
+// shown: some offered, in order, each carrying a price label; the rest dropped,
+// each carrying the reason. The rules below are the planner's, not the
+// resolver's, so they live in their own suite. As with `describeResolverContract`,
+// run them in your own suite and a pass means your planner honours them:
+//
+//   describePlannerContract("MyPlanner", (fixtures) => new MyPlanner(...), {
+//     input: myPlanInput,
+//     unattestedDomains: ["not-attested.example"],
+//   });
+//
+// The suite is structural: it needs `plan(input)` to return `{ offered, dropped }`
+// and nothing else, so it does not tie a planner to any one input type.
+//
+// The four cases, and why each one is on the list:
+//
+//   1. an unattested option is never offered — an option nobody has vouched for
+//      is the one a sender must never be shown as a way to pay.
+//   2. every dropped option carries a reason — a route that vanishes without
+//      one cannot be explained to the sender or debugged by the operator.
+//   3. the same input yields the same order — the ranking has no hidden weights
+//      and no randomness, so a re-plan cannot reshuffle what the sender saw.
+//   4. every label is one of the three — "locked", "indicative" or "estimated".
+//      A fourth label is a price the sender has no wording for.
+
+/** One route the planner offers, in the position it ranks. */
+export interface PlannedOption {
+  /** The receiving anchor's home domain. */
+  readonly domain: string;
+  /** How firmly the price is held: the router's own `AllowedPriceLabel` (RFC 0004 §1). */
+  readonly label: AllowedPriceLabel;
+}
+
+/** One route the planner ruled out, and why. */
+export interface DroppedOption {
+  readonly domain: string;
+  readonly reason: string;
+}
+
+/** What a planner returns: the ranked offers and everything it ruled out. */
+export interface PlanOutcome {
+  readonly offered: readonly PlannedOption[];
+  readonly dropped: readonly DroppedOption[];
+}
+
+/** The part of a planner the contract exercises. */
+export interface PlannerUnderTest<TInput> {
+  plan(input: TInput): PlanOutcome | Promise<PlanOutcome>;
+}
+
+/** What the suite plans with. A planner has no default input, so both are required. */
+export interface PlannerContractFixtures<TInput> {
+  /** An input whose candidates include at least one of `unattestedDomains`. */
+  readonly input: TInput;
+  /** Home domains in `input` that are not attested and so must never be offered. */
+  readonly unattestedDomains: readonly string[];
+}
+
+/** A planner under test, built against the fixtures the suite will use. */
+export type PlannerFactory<TInput> = (
+  fixtures: PlannerContractFixtures<TInput>,
+) => PlannerUnderTest<TInput> | Promise<PlannerUnderTest<TInput>>;
+
+export interface PlannerContractResult {
+  readonly name: string;
+  readonly passed: boolean;
+  readonly detail: string;
+}
+
+export interface PlannerContractReport {
+  readonly planner: string;
+  readonly passed: boolean;
+  readonly results: readonly PlannerContractResult[];
+}
+
+async function planOnce<TInput>(
+  planner: PlannerUnderTest<TInput>,
+  input: TInput,
+): Promise<PlanOutcome> {
+  let outcome: PlanOutcome;
+  try {
+    outcome = await planner.plan(input);
+  } catch (cause) {
+    violate(
+      "plan() threw %s — a planner with nothing to offer returns an empty `offered` and says why in `dropped`",
+      describeError(cause),
+    );
+  }
+  if (!outcome || !Array.isArray(outcome.offered) || !Array.isArray(outcome.dropped)) {
+    violate(
+      "plan() did not return { offered: [], dropped: [] }, got %s",
+      JSON.stringify(outcome),
+    );
+  }
+  return outcome;
+}
+
+function plannerCasesFor<TInput>(
+  makePlanner: PlannerFactory<TInput>,
+  fixtures: PlannerContractFixtures<TInput>,
+): Case[] {
+  const planner = async (): Promise<PlannerUnderTest<TInput>> => makePlanner(fixtures);
+  const run = async (): Promise<PlanOutcome> => planOnce(await planner(), fixtures.input);
+
+  return [
+    {
+      name: "an unattested option is never offered",
+      run: async () => {
+        if (fixtures.unattestedDomains.length === 0) {
+          violate(
+            "the fixtures name no unattested domain, so this case would prove nothing; " +
+              "supply at least one in `unattestedDomains`",
+          );
+        }
+        const { offered } = await run();
+        const unattested = new Set(fixtures.unattestedDomains);
+        const leaked = offered.filter((o) => unattested.has(o.domain)).map((o) => o.domain);
+        if (leaked.length > 0) {
+          violate(
+            `offered unattested domain(s) ${leaked.join(", ")}; an option no one has vouched for ` +
+              `must be dropped, not shown to the sender`,
+          );
+        }
+        return `${offered.length} offered, none of ${fixtures.unattestedDomains.length} unattested`;
+      },
+    },
+    {
+      name: "every dropped option carries a reason",
+      run: async () => {
+        const { dropped } = await run();
+        for (const d of dropped) {
+          if (!d || typeof d.domain !== "string" || d.domain === "") {
+            violate(`a dropped option has no domain: ${JSON.stringify(d)}`);
+          }
+          if (typeof d.reason !== "string" || d.reason.trim() === "") {
+            violate(
+              `${d.domain} was dropped with no reason; a route that vanishes unexplained cannot ` +
+                `be shown to the sender or debugged by the operator`,
+            );
+          }
+        }
+        return `${dropped.length} dropped, each with a reason`;
+      },
+    },
+    {
+      name: "the same input yields the same order",
+      run: async () => {
+        const p = await planner();
+        const order = async (): Promise<string[]> =>
+          (await planOnce(p, fixtures.input)).offered.map((o) => `${o.domain}:${o.label}`);
+        const first = await order();
+        const second = await order();
+        if (first.join(" > ") !== second.join(" > ")) {
+          violate(
+            `the same input ranked as [${first.join(", ")}] then [${second.join(", ")}]; ` +
+              `a re-plan must not reshuffle what the sender already saw`,
+          );
+        }
+        return `${first.length} option(s) in the same order on both calls`;
+      },
+    },
+    {
+      name: "every label is locked, indicative or estimated",
+      run: async () => {
+        const { offered } = await run();
+        for (const o of offered) {
+          if (!ALL_PRICE_LABELS.includes(o.label)) {
+            violate(
+              `${o.domain} is labelled %s, which the contract does not define ` +
+                `(locked, indicative or estimated)`,
+              JSON.stringify(o.label),
+            );
+          }
+        }
+        return `${offered.length} option(s), all with a defined label`;
+      },
+    },
+  ];
+}
+
+/**
+ * Run the planner contract without registering it, for suites that want the
+ * report — including one that proves a deliberately broken planner fails it.
+ */
+export async function checkPlannerContract<TInput>(
+  plannerName: string,
+  makePlanner: PlannerFactory<TInput>,
+  fixtures: PlannerContractFixtures<TInput>,
+): Promise<PlannerContractReport> {
+  const results: PlannerContractResult[] = [];
+  for (const c of plannerCasesFor(makePlanner, fixtures)) {
+    try {
+      results.push({ name: c.name, passed: true, detail: await c.run() });
+    } catch (cause) {
+      const detail =
+        cause instanceof ContractViolation
+          ? cause.message
+          : `the case itself could not run: ${describeError(cause)}`;
+      results.push({ name: c.name, passed: false, detail });
+    }
+  }
+  return { planner: plannerName, passed: results.every((r) => r.passed), results };
+}
+
+/** Throw, naming every case the planner failed. */
+export function expectPlannerContract(report: PlannerContractReport): void {
+  const failures = report.results.filter((r) => !r.passed);
+  if (failures.length > 0) {
+    throw new Error(
+      `${report.planner} violates the planner contract:\n` +
+        failures.map((f) => `  - ${f.name}: ${f.detail}`).join("\n"),
+    );
+  }
+}
+
+/** Register the planner contract as vitest cases, one per clause. */
+export function describePlannerContract<TInput>(
+  plannerName: string,
+  makePlanner: PlannerFactory<TInput>,
+  fixtures: PlannerContractFixtures<TInput>,
+): void {
+  describe(`Planner contract: ${plannerName}`, () => {
+    for (const c of plannerCasesFor(makePlanner, fixtures)) {
       it(c.name, async () => {
         await c.run();
       });

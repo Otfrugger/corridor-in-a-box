@@ -18,6 +18,7 @@ import {
   nativeToScVal,
   xdr,
 } from "@stellar/stellar-sdk";
+import { STROOP_SCALE, fromScaled } from "@corridor/types";
 
 /** SEP numbers in the registry's bit order. Mirrors SEP_NUMBERS in the contract. */
 export const SEP_NUMBERS = [1, 6, 10, 12, 24, 31, 38] as const;
@@ -55,7 +56,15 @@ export enum RegistryContractError {
   InvalidAssetCode = 8,
   DuplicateAsset = 9,
   InvalidCountry = 10,
+  InvalidAmount = 11,
 }
+
+/**
+ * What a simulation reports when the deployed contract has no function of the
+ * name that was called, i.e. it was deployed before that function existed. Read
+ * from the deployed testnet registry, not guessed.
+ */
+const MISSING_METHOD = "Error(WasmVm, MissingValue)";
 
 /**
  * The numeric contract error inside a simulation failure's message, if it names
@@ -111,6 +120,32 @@ export interface AnchorMetadata {
    * Ledger the metadata was read at. Separate from the record's
    * `attestedLedger`, because the two are written by separate calls — metadata
    * from last week is not evidence about this week's bitmaps.
+   */
+  readonly attestedLedger: number;
+  readonly attester: string;
+}
+
+/** One asset of an anchor's SEP-31 receive list, with the bounds it stated. */
+export interface ReceiveAssetLimits {
+  /** The asset code exactly as the anchor's `/info` keyed it. */
+  readonly code: string;
+  /**
+   * OBSERVED `min_amount`, as a decimal string of at most seven places. Absent
+   * when none was recorded, which is not a minimum of zero.
+   */
+  readonly minAmount?: string;
+  /** OBSERVED `max_amount`, on the same terms. Absent is not "no upper bound". */
+  readonly maxAmount?: string;
+}
+
+/** The receive list as stored under its own key on chain. */
+export interface AnchorReceiveList {
+  readonly domain: string;
+  /** In the order the anchor's `/info` listed them. */
+  readonly assets: readonly ReceiveAssetLimits[];
+  /**
+   * Ledger the list was read at. A third clock, beside the record's and the
+   * metadata's: each is written by its own call.
    */
   readonly attestedLedger: number;
   readonly attester: string;
@@ -240,6 +275,37 @@ interface RawMeta {
   attester: string;
 }
 
+/** Raw shape of one `ReceiveAsset`: an i128 decodes to a bigint, `None` to null. */
+interface RawReceiveAsset {
+  code: string;
+  min_amount: bigint | null;
+  max_amount: bigint | null;
+}
+
+/** Raw shape of `get_receive`'s return value. */
+interface RawReceiveList {
+  domain: string;
+  assets: RawReceiveAsset[];
+  attested_ledger: number;
+  attester: string;
+}
+
+/**
+ * One stored entry as a reader sees it: amounts back in decimal, and a bound
+ * that was never recorded left out altogether, so nobody mistakes it for zero.
+ */
+function receiveAssetLimits(raw: RawReceiveAsset): ReceiveAssetLimits {
+  const amount = (v: bigint | null) =>
+    v === null || v === undefined ? undefined : fromScaled(BigInt(v), STROOP_SCALE);
+  const minAmount = amount(raw.min_amount);
+  const maxAmount = amount(raw.max_amount);
+  return {
+    code: raw.code,
+    ...(minAmount === undefined ? {} : { minAmount }),
+    ...(maxAmount === undefined ? {} : { maxAmount }),
+  };
+}
+
 export class AnchorRegistry {
   private readonly server: rpc.Server;
   private readonly contract: Contract;
@@ -358,6 +424,53 @@ export class AnchorRegistry {
       nativeToScValString(domain),
       nativeToScValString(code),
     );
+  }
+
+  /**
+   * The receive list OBSERVED for a domain, each asset with the bounds the
+   * anchor stated, or `null` when the registry holds none for it.
+   *
+   * `null` covers a domain attested before receive lists existed, and it covers
+   * a registry that was itself deployed before they existed: such a contract
+   * has no `get_receive`, and for every domain in it "holds none" is the true
+   * answer. Any other failure is rethrown, as in {@link AnchorRegistry.getMeta}.
+   *
+   * It repeats the codes `getMeta` returns, on its own clock. Compare
+   * `attestedLedger` on the two if it matters which was read last.
+   */
+  async getReceive(domain: string): Promise<AnchorReceiveList | null> {
+    let raw: RawReceiveList;
+    try {
+      raw = await this.read<RawReceiveList>("get_receive", nativeToScValString(domain));
+    } catch (e) {
+      if (contractErrorCode(e) === RegistryContractError.NotFound) return null;
+      if (String(e instanceof Error ? e.message : e).includes(MISSING_METHOD)) return null;
+      throw e;
+    }
+    return {
+      domain: raw.domain,
+      assets: raw.assets.map(receiveAssetLimits),
+      attestedLedger: raw.attested_ledger,
+      attester: raw.attester,
+    };
+  }
+
+  /**
+   * The bounds OBSERVED for one asset code, or `null` when the anchor's receive
+   * list does not hold that code. Asks the contract, and matches the code
+   * exactly, like {@link AnchorRegistry.receivesAsset}.
+   *
+   * Throws the contract's `NotFound` when no receive list was ever recorded for
+   * the domain. That is a different answer from `null`: "nobody looked" is not
+   * "it does not take this asset". Use `getReceive` to get the first as a value.
+   */
+  async receiveLimits(domain: string, code: string): Promise<ReceiveAssetLimits | null> {
+    const raw = await this.read<RawReceiveAsset | null>(
+      "receive_limits",
+      nativeToScValString(domain),
+      nativeToScValString(code),
+    );
+    return raw === null || raw === undefined ? null : receiveAssetLimits(raw);
   }
 
   /** SHA-256 of the stellar.toml the latest attestation was made from. */

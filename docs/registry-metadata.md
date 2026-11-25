@@ -1,6 +1,7 @@
 # Design: country and receive-asset metadata on registry records
 
-Status: agreed and implemented. Answers #241; the code is #242.
+Status: agreed and implemented. Answers #241; the code is #242. Decision 6, the
+amount bounds on the receive list, came later with #669.
 
 ## The problem
 
@@ -86,6 +87,11 @@ The layout anticipates the addition without requiring it: one `Meta` key per
 domain holding a struct, so a withdraw list is a new field on `AnchorMeta` and a
 new reader, not a new key or a migration.
 
+That last sentence did not survive #669. A stored struct is decoded by its exact
+set of fields, so a field added to `AnchorMeta` makes every entry written before
+it unreadable (decision 6 has the details and the test). A withdraw list, when a
+query needs one, should get its own key the way the receive limits did.
+
 ### 4. Schema evolution: a separate `DataKey::Meta(String)`
 
 A struct version on `AnchorRecord` was the alternative. Rejected:
@@ -154,6 +160,83 @@ asserts the attester's constants equal the registry's. The attester crate cannot
 import them — linking the registry into its wasm collides on `__constructor`, see
 `RegistryInterface` in that file.
 
+### 6. Receive limits: a third key, amounts as scaled integers (#669)
+
+`receive_assets` says which assets an anchor takes. A planner also needs to know
+how much: SEP-31 `/info` states a `min_amount` and a `max_amount` beside each
+asset, and without them every candidate lane costs a call to the anchor just to
+learn that the amount does not fit. So the receive list is recorded a second
+time, with those bounds, and read in one call.
+
+**A third key, `DataKey::Receive(String)`, not new fields on `AnchorMeta`.** This
+one is not a matter of taste. Soroban decodes a stored struct by its exact set of
+fields: read an entry as the same struct with one more field, even an optional
+one, and the host refuses with `Error(Object, UnexpectedSize)`, which inside a
+contract is a trap. Every `Meta` entry written before the change would stop
+answering `get_meta` until someone rewrote it, and only the attester can write.
+`a_stored_struct_cannot_gain_a_field` in `contracts/registry/src/test.rs` shows
+the failure, and `metadata_stored_before_the_receive_list_existed_still_reads`
+fails the day someone adds a field to `AnchorMeta` anyway. The rule that follows:
+`DataKey` is append-only, and so are the structs it points at.
+
+The new entry repeats the asset codes that `Meta` holds. That is deliberate: it
+is one observation of one response, self-contained, on its own clock. The two
+entries are written by separate calls and can disagree for a while, and each
+carries its `attested_ledger` so a reader can see which is newer.
+`receives_asset` still answers from `Meta`.
+
+**Amounts are `Option<i128>`, scaled by 10^7.** Seven decimal places is the
+precision Stellar carries (`AMOUNT_DECIMALS`), so a bound and the payment it is
+compared with are in the same unit. `None` means no bound was recorded. It does
+not mean a minimum of zero or an unlimited maximum, and a stated zero is stored
+as zero.
+
+**Nothing is rounded.** The probe records a bound only when it can be written on
+that scale exactly: a JSON number or a plain decimal string, not negative, at
+most seven decimal places, and for a JSON number at most 15 significant digits,
+since past that the digits are the float's and not the anchor's. Anything else is
+left out, the asset stays in the list, and the entry reads "no bound recorded".
+Rounding a minimum down or a maximum up would put a number on chain that the
+anchor never gave.
+
+**A minimum above the maximum is stored as observed.** It is what the endpoint
+said, and a reader comparing an amount against the pair gets the right answer
+from it: nothing fits. A negative bound is refused (`InvalidAmount`: registry
+`#11`, attester `#9`), because an amount cannot be negative and so it can only be
+a writer's mistake.
+
+| Rule         | Value                | Why                                                                            |
+| ------------ | -------------------- | ------------------------------------------------------------------------------ |
+| Entries      | `MAX_RECEIVE_ASSETS` | The same ceiling as the code list: this is the same list.                      |
+| Code         | as in `Meta`         | Non-empty, at most `MAX_ASSET_CODE_LEN` bytes, stored verbatim, no duplicates. |
+| Bound        | `>= 0` or absent     | Absent is a fact ("not stated"); negative is not one.                          |
+| Order        | as served            | Re-sorting would rewrite the observation.                                      |
+| Second write | replaces             | An asset the anchor stopped listing must not linger from the last observation. |
+
+**The writer path is a third call.** `attest_receive` on the attester relays to
+`put_receive`, with its own cooldown (`LastReceive`) for the reason `LastMeta`
+has one. `attest` and `attest_meta` keep the signatures the deployed client
+calls. The cost is a third transaction per sweep for each domain that has a
+receive list.
+
+**Rolling it out.** A contract deployed before this has no such method, and a
+call to one answers `Error(WasmVm, MissingValue)`, which is a different shape
+from a contract error. The clients treat it as "not deployed yet", not as a
+failure:
+
+- `AnchorAttester.attestReceive` returns an error with `methodMissing` set. This
+  also covers an upgraded attester relaying to a registry that has no
+  `put_receive` yet.
+- `pnpm attest` still writes the bitmaps and the metadata, skips the limits for
+  the rest of the run, and prints one warning (a `::warning::` annotation under
+  GitHub Actions). The run does not fail.
+- `AnchorRegistry.getReceive` returns `null`, the same answer it gives for a
+  domain with no receive list.
+
+Upgrade the registry first and the attester second, so there is never an
+attester relaying to a method that does not exist. Nothing stored has to be
+migrated: a domain simply has no receive list until its next attestation.
+
 ## Storage layout
 
 ```
@@ -165,10 +248,20 @@ Persistent: Anchor(String) -> AnchorRecord      # unchanged
                 country: Option<String>,         # declared, alpha-2
                 attested_ledger: u32,
                 attester: Address }
+            Receive(String) -> ReceiveList      # added with #669
+              { domain: String,
+                assets: Vec<ReceiveAsset>,       # observed, in the order served
+                  # { code: String,
+                  #   min_amount: Option<i128>,  # scaled by 10^7; None = not recorded
+                  #   max_amount: Option<i128> }
+                attested_ledger: u32,
+                attester: Address }
 ```
 
 Events: `put_meta` publishes `meta_attested` (`Attested` keeps its shape), so an
-indexer can follow either half without polling. A metadata write extends the
+indexer can follow either half without polling. `put_receive` publishes
+`receive_attested` in the same way, and `bump(domain)` extends the receive list
+along with the other two entries. A metadata write extends the
 metadata entry and the contract instance, the way `put_anchor` extends the record
 it wrote, and `bump(domain)` extends both entries a domain has so the record
 cannot outlive its own metadata — or the other way round. Neither read extends
@@ -207,6 +300,23 @@ contract rather than filtering `get_meta` in the caller, and the reader exposes
 the contract's error numbers as `RegistryContractError` with `contractErrorCode`
 to pull one out of a simulation failure, so "this domain has no metadata" is a
 comparison against `NotFound` rather than a match against English wording.
+
+The receive limits (decision 6) follow the same pattern. `ProbeResult.receiveLimits`
+is the list as `{ code, minAmount?, maxAmount? }`, with amounts as decimal strings
+and never JS numbers, present exactly when `receiveAssets` is.
+`AnchorAttester.attestReceive(result)` scales each bound to an `i128` and sends an
+absent one as `scvVoid`. It refuses locally when there is no observation to send,
+and when a bound is not an amount the contract would take.
+`AnchorRegistry.getReceive(domain)` returns the list with amounts back in decimal
+and an unrecorded bound left out of the object altogether, or `null` when the
+registry holds no list; `receiveLimits(domain, code)` asks the contract about one
+code.
+
+One string of bytes holds the two languages to the same encoding.
+`tests/attester-receive.test.ts` asserts the client sends it,
+`decodes_the_receive_list_the_typescript_client_sends` in the attester crate
+decodes it into the contract's type and relays it, and
+`tests/registry-receive.test.ts` reads it back.
 
 ## Follow-ups, not decided here
 

@@ -232,7 +232,7 @@
   },
   {
     "id": "ng-cowrie",
-    "status_note": "REAL — Cowrie Exchange (Lagos, Nigeria), confirmed 2026-10-17. No SEP-38, no payment attempted, no business relationship in place.",
+    "status_note": "REAL — Cowrie Exchange (Lagos, Nigeria), confirmed 2026-10-17. No SEP-38. Sandbox payment checked 2026-11-24: not possible — toml and SEP-10 are public-network only, no public sandbox found, no business relationship. No payment attempted.",
     "source": {
       "name": "USD Sending Anchor",
       "asset": "USDC",
@@ -291,7 +291,7 @@
   },
   {
     "id": "testanchor-sep6",
-    "status_note": "SDF Test Anchor (testanchor.stellar.org) on testnet via SEP-6. Endpoints read from its stellar.toml 2026-10-17. No payment attempted; plan reports it VERIFIED from those endpoints alone.",
+    "status_note": "SDF Test Anchor (testanchor.stellar.org) on testnet via SEP-6. Endpoints read from its stellar.toml 2026-10-17. Payout attempted 2026-11-22: SEP-10 and SEP-12 succeeded and /sep6/withdraw returned transaction 19a2872f-278c-4867-9931-7e7f82ee67a6, but it stayed incomplete with no withdraw_anchor_account and no Stellar payment was possible; /sep6/withdraw-exchange rejects USDC (HTTP 400) and the more_info_url rejects the SEP-6 token (401). No proof; plan reports it VERIFIED from those endpoints alone.",
     "source": {
       "name": "Testnet Sending Anchor",
       "asset": "USDC",
@@ -351,7 +351,7 @@
   },
   {
     "id": "zeam",
-    "status_note": "REAL — Zeam (mint.zeam.money), probed 2026-10-17: SEP-10/12/31/38 all answer. No payment attempted, no business relationship in place.",
+    "status_note": "REAL — Zeam (mint.zeam.money), probed 2026-10-17: SEP-10/12/31/38 all answer. Testnet/sandbox payment checked 2026-11-24: not possible — toml and SEP-10 are public-network only; Zeam's sandbox is for its API Gateway and needs a business-portal account this repo does not have. No payment attempted.",
     "source": {
       "name": "USD Sending Anchor",
       "asset": "USDC",

@@ -8,8 +8,10 @@ This document specifies the readiness criteria, operational procedures, security
 
 Before initiating mainnet deployment, the following milestones must be fully met and verified:
 
-1. **Storage TTL Fix Merged (#245)**:
+1. **Storage TTL Fix Merged (#245)** — **done** ([#447](https://github.com/corridor-in-a-box/corridor-in-a-box/pull/447), merged 2026-10-18):
    - Ensure the persistent storage TTL extension logic is implemented and tested so that active registry entries and instance storage never silently expire into archival state.
+   - Implemented: every write path extends what it touched and its own contract instance, from `TTL_THRESHOLD` (30 ledger-days) to `TTL_EXTEND_TO` (90) — `extend_instance`/`extend_record` in `contracts/registry/src/lib.rs`, `extend_instance`/`extend_entry` in `contracts/attester/src/lib.rs`. `registry.bump(domain)` lets any account refresh a live record without admin rights, but cannot revive one already archived (see "Restoring an archived entry" in the registry header).
+   - Tested by `cargo test`, which CI runs on every push and pull request in the `contracts` job of `.github/workflows/ci.yml`: `a_record_outlives_the_default_ttl_by_a_wide_margin` and `a_bare_set_gets_only_the_default_ttl` (`contracts/registry/src/test.rs`), `an_enrolment_outlives_the_default_ttl_by_a_wide_margin` and `a_cooldown_longer_than_the_default_ttl_is_still_enforced` (`contracts/attester/src/test.rs`).
 2. **End-to-End Upgrade Rehearsal on Testnet**:
    - Rehearse `upgrade(new_wasm_hash)` on the testnet deployment (`contracts/deployments.json:testnet`).
    - Verify that an upgraded WASM retains existing `Anchor(domain)` state, domain list indices, and attester permissions without state migration failures.
@@ -66,15 +68,15 @@ The `Registry` requires `attester: Address` in its constructor, while the `Attes
 
 ### Cost Model (Mainnet)
 
-- **Fleet Size**: 19 anchors in `contracts/anchors.json` (as of 2026-10-25; it grows as anchors are added).
+- **Fleet Size**: 24 anchors in `contracts/anchors.json` (as of 2026-11-20; it grows as anchors are added).
 - **Frequency**: 1 attestation per anchor per day.
 - **Per-Transaction Cost**: ~0.05 to 0.10 XLM (covering base fee, CPU/memory instructions, and persistent entry write footprint).
-- **Daily Spend**: ~1.0 to 1.9 XLM (19 attestations at the per-transaction cost).
-- **Monthly Run Rate**: ~30 to 60 XLM per month (plus periodic storage rent extensions).
+- **Daily Spend**: ~1.2 to 2.4 XLM (24 attestations at the per-transaction cost).
+- **Monthly Run Rate**: ~36 to 72 XLM per month (plus periodic storage rent extensions).
 
 ### Treasury & Operational Account
 
-- A dedicated attestation distribution account (`G...`) will be funded with **250 XLM** (roughly 4 to 8 months of operations at the rate above).
+- A dedicated attestation distribution account (`G...`) will be funded with **250 XLM** (roughly 3.5 to 7 months of operations at the rate above).
 - Automated alerting triggers when balance falls below **50 XLM**.
 - Funded and sponsored by the ecosystem operations grant.
 
@@ -120,14 +122,21 @@ Update `contracts/deployments.json`:
     "rpcUrl": "https://mainnet.sorobanrpc.com",
     "registry": "<REGISTRY_ID>",
     "attester": "<ATTESTER_ID>",
-    "deployedAt": "2026-10-XX"
+    "deployedAt": "2026-10-XX",
+    "upgrades": []
   }
 ```
+
+The file is validated against `contracts/deployments.schema.json` by `tests/deployments.test.ts`.
+A deployed contract needs a `deployedAt` date, and every `upgrade()` is appended to `upgrades`
+(oldest first) with the contract name, the new wasm hash, the transaction hash, the date and the
+ledger, as in the `testnet` entry.
 
 ### 4. Consumer Opt-In
 
 - `examples/read-registry.ts`: Reads `deployments.json` for `STELLAR_NETWORK=public`.
 - `RegistryRouteResolver` (`@corridor/router`): Connects to `deployments.json["public"].registry` for mainnet settlement validation.
+- Dashboard (`web/`): Reads both networks from `deployments.json`. Its Mainnet view shows "No registry on Mainnet yet" while `public.registry` is `null` and the mainnet attestations once it is set, with no code change.
 - Workflow execution: Mainnet scheduled attestation runs under a dedicated, permissions-restricted workflow dispatch or separate cron.
 
 ---

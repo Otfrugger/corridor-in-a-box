@@ -15,6 +15,7 @@
 
 import { Contract, rpc, scValToNative, TransactionBuilder, Account, nativeToScVal } from "@stellar/stellar-sdk";
 import deployments from "../../contracts/deployments.json";
+import { parseNetwork, type NetworkId } from "./network";
 
 /** SEP numbers in the registry's bit order. Mirrors SEP_NUMBERS in the contract. */
 export const SEP_NUMBERS = [1, 6, 10, 12, 24, 31, 38] as const;
@@ -60,8 +61,18 @@ function config(network: string) {
   return cfg?.registry ? cfg : undefined;
 }
 
-export const REGISTRY_NETWORK: string = process.env.STELLAR_NETWORK ?? "testnet";
-export const REGISTRY_ID: string | undefined = config(REGISTRY_NETWORK)?.registry ?? undefined;
+/**
+ * The network a page reads when it is not told which: `STELLAR_NETWORK`, or testnet. A value
+ * that names neither network also means testnet, and every card says which network it shows.
+ */
+export const REGISTRY_NETWORK: NetworkId = parseNetwork(process.env.STELLAR_NETWORK) ?? "testnet";
+
+/** The registry contract on a network, or undefined while none is deployed there. */
+export function registryId(network: string): string | undefined {
+  return config(network)?.registry ?? undefined;
+}
+
+export const REGISTRY_ID: string | undefined = registryId(REGISTRY_NETWORK);
 
 function decode<T>(mask: number, names: readonly T[]): T[] {
   return names.filter((_, i) => (mask & (1 << i)) !== 0);
@@ -77,9 +88,13 @@ interface RawRecord {
   attester: string;
 }
 
-async function read<T>(method: string, args: ReturnType<typeof nativeToScVal>[] = []): Promise<T> {
-  const cfg = config(REGISTRY_NETWORK);
-  if (!cfg?.registry) throw new Error(`no registry deployed on ${REGISTRY_NETWORK}`);
+async function read<T>(
+  network: string,
+  method: string,
+  args: ReturnType<typeof nativeToScVal>[] = [],
+): Promise<T> {
+  const cfg = config(network);
+  if (!cfg?.registry) throw new Error(`no registry deployed on ${network}`);
 
   const server = new rpc.Server(cfg.rpcUrl);
   const contract = new Contract(cfg.registry);
@@ -108,9 +123,15 @@ const str = (s: string) => nativeToScVal(s, { type: "string" });
  *
  * `readAt` and `latestLedger` say when this snapshot was taken, so a page that
  * serves it from cache can say how old it is instead of presenting it as live.
+ *
+ * `deployed` is false when the network has no registry at all. That is a third
+ * answer, apart from "could not read" and "read, and it is empty": there is
+ * nothing to call, so nothing is called.
  */
-export async function fetchAttestations(): Promise<{
+export async function fetchAttestations(network: string = REGISTRY_NETWORK): Promise<{
   ok: boolean;
+  /** Whether this network has a registry to read. */
+  deployed: boolean;
   error?: string;
   anchors: AnchorAttestation[];
   /** ISO time the read started. Set even when the read failed. */
@@ -119,24 +140,31 @@ export async function fetchAttestations(): Promise<{
   latestLedger?: number;
 }> {
   const readAt = new Date().toISOString();
+  const cfg = config(network);
+  if (!cfg) {
+    return {
+      ok: false,
+      deployed: false,
+      error: `no registry deployed on ${network}`,
+      anchors: [],
+      readAt,
+    };
+  }
   try {
-    const cfg = config(REGISTRY_NETWORK);
     // Read before the anchors so the ledger is a lower bound on what they reflect.
     // Best-effort: the ledger only labels the snapshot, so failing to get it
     // must not hide attestations that read fine.
-    const latestLedger = cfg
-      ? await new rpc.Server(cfg.rpcUrl)
-          .getLatestLedger()
-          .then((l) => l.sequence)
-          .catch(() => undefined)
-      : undefined;
-    const domains = await read<string[]>("domains");
+    const latestLedger = await new rpc.Server(cfg.rpcUrl)
+      .getLatestLedger()
+      .then((l) => l.sequence)
+      .catch(() => undefined);
+    const domains = await read<string[]>(network, "domains");
     const anchors = await Promise.all(
       domains.map(async (domain) => {
-        const raw = await read<RawRecord>("get_anchor", [str(domain)]);
+        const raw = await read<RawRecord>(network, "get_anchor", [str(domain)]);
         const [servesSep31, staleness] = await Promise.all([
-          read<boolean>("serves_sep31", [str(domain)]),
-          read<number>("staleness", [str(domain)]),
+          read<boolean>(network, "serves_sep31", [str(domain)]),
+          read<number>(network, "staleness", [str(domain)]),
         ]);
         return {
           domain: raw.domain,
@@ -152,10 +180,11 @@ export async function fetchAttestations(): Promise<{
       }),
     );
     anchors.sort((a, b) => a.domain.localeCompare(b.domain));
-    return { ok: true, anchors, readAt, latestLedger };
+    return { ok: true, deployed: true, anchors, readAt, latestLedger };
   } catch (e) {
     return {
       ok: false,
+      deployed: true,
       error: e instanceof Error ? e.message : String(e),
       anchors: [],
       readAt,
